@@ -1,5 +1,12 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.6.0', notes: [
+    'Snapping: moving or resizing lines things up with the canvas edges and centre, other layers, and the template outlines. Hold Ctrl to skip it, or turn Snap off in the Move tool.',
+    'Move, resize and rotate shapes with the Shape tool, and text with the Text tool - no need to switch to Move. Click text to edit it, drag it to move it.',
+    'Text and shapes stay editable: the fill bucket recolours them, Flip flips them, and painting asks before turning them into pixels.',
+    'Dragging text is much smoother.',
+    'Sizes and positions stay whole numbers when you resize or draw.',
+  ] },
   { version: '0.5.0', notes: [
     'Smoother feel: panels slide open and shut like drawers, and popups, menus and the Home page fade in and out.',
     'Full screen with F11, or Panels → Full screen.',

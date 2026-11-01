@@ -247,7 +247,7 @@ function beginOp(opts = {}) {
     const proxy = { id: l.id, name: l.name, canvas: m, ctx: ctxOf(m), visible: true };
     return { l: proxy, before: proxy.ctx.getImageData(0, 0, W, H), real: l, realBefore: l.ctx.getImageData(0, 0, W, H), vb: clone(l.vec) };
   }
-  if (l.vec && !opts.vec) { flushVecEdit(); endTextEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); toast(`“${l.name}” was rasterized so it can be painted on`); }
+  if (l.vec && !opts.vec) { askRasterize(l); return null; } // text/shapes stay editable unless the user agrees
   return { l, before: l.ctx.getImageData(0, 0, W, H), vb: l.vec ? clone(l.vec) : undefined };
 }
 function restoreOp(o) { o.l.ctx.putImageData(o.before, 0, 0); if (o.real) { o.real.vec = clone(o.vb); renderFill(o.real, o.l.canvas); return; } if (o.vb !== undefined) o.l.vec = clone(o.vb); }
@@ -354,7 +354,7 @@ Object.assign(state, {
   brush: { size: 20, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, mirror: 'none', scatter: false, hard: false, pressure: true },
   eraser: { size: 30, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, hard: false, pressure: true },
   pencilSize: 1, selType: 'rect', selMode: 'new', feather: 0, antialias: true,
-  lassoType: 'free', lassoSize: 20, wandTol: 32, contiguous: true, wandSampleAll: false, arrFixed: true,
+  lassoType: 'free', lassoSize: 20, wandTol: 32, contiguous: true, wandSampleAll: false, arrFixed: true, snap: true,
 });
 const brushOf = () => state.tool === 'eraser' ? state.eraser : state.brush;
 
@@ -635,6 +635,9 @@ const shapeTool = {
 
 function floodFill(p, e) {
   const l = activeLayer(); if (!l.visible) { toast('The active layer is hidden'); return; }
+  if ((l.vec?.type === 'text' || l.vec?.type === 'shape') && !doc().noSel) { // recolour editable text/shapes instead of rasterizing them
+    addRecent(state.fg); vecEdit(l, v => { v.fill = { type: 'color', color: state.fg }; }, l.vec.type === 'text' ? 'Text colour' : 'Shape fill'); buildOptions(); return;
+  }
   const o = beginOp(); if (!o) return;
   const fillC = mkCanvas(), fx = fillC.getContext('2d');
   if (e && e.shiftKey) { fx.fillStyle = state.fg; fx.fillRect(0, 0, W, H); }
@@ -673,7 +676,10 @@ function renderArr(o) {
   }
   if (arr.vec) {
     const a = arr, v = o.l.vec;
-    if (v.type === 'text') { if (Math.abs(a.h - v.h) > .5 || Math.abs(a.w - v.w) > .5) { const k = Math.abs(a.h - v.h) > .5 ? a.h / v.h : a.w / v.w; v.size = Math.max(4, Math.round(v.size * k * 10) / 10); } }
+    if (v.type === 'text') { // resizing text scales its font size from where the drag started, in whole pixels
+      const b = o.vb || v;
+      if (Math.abs(a.h - b.h) > .5 || Math.abs(a.w - b.w) > .5) { const k = Math.abs(a.h - b.h) > .5 ? a.h / b.h : a.w / b.w; v.size = Math.max(4, Math.round(b.size * k)); }
+    }
     else { v.w = a.w; v.h = a.h; }
     Object.assign(v, { x: a.x, y: a.y, angle: a.angle, flipX: a.flipX, flipY: a.flipY }); renderVec(o.l);
     if (v.type === 'text') { a.w = v.w; a.h = v.h; }
@@ -709,6 +715,7 @@ const arrangeTool = {
       if (b && p.x >= b[0] && p.y >= b[1] && p.x <= b[0] + b[2] && p.y <= b[1] + b[3]) {
         const mem = groupMembers(d.activeGroup); if (mem.some(l => l.locked)) { toast('A layer in this group is locked'); return; }
         op = { gmove: true, start: p, struct: snapStruct(), mem: mem.map(l => ({ l, snap: (() => { const c = mkCanvas(); c.getContext('2d').drawImage(l.canvas, 0, 0); return c; })(), vec: clone(l.vec), mask: l.vec?.type === 'fill' ? maskCanvas(l.vec.mask) : null })) };
+        op.snap = snapTargets(new Set(mem.map(l => l.id))); op.b0 = unionBounds(mem);
         return;
       }
     }
@@ -720,11 +727,13 @@ const arrangeTool = {
       selectLayer(hit); a = ensureArr(); if (a.empty) return;
     }
     op = beginOp({ vec: !!a.vec }); if (!op) return;
-    op.arr = { hit: arrHit(p), start: p, a0: { ...a } };
+    op.arr = { hit: arrHit(p), start: p, a0: { ...a }, snap: snapTargets(new Set([activeLayer().id])) };
   },
   move(p, e) {
     if (op?.gmove) {
-      const dx = Math.round(p.x - op.start.x), dy = Math.round(p.y - op.start.y);
+      let dx = Math.round(p.x - op.start.x), dy = Math.round(p.y - op.start.y);
+      if (op.b0) { const b = op.b0, s = snapBox(b[0] + dx, b[1] + dy, b[2], b[3], op.snap, e); dx += s.dx; dy += s.dy; op.snapLines = s.lines; }
+      op.moved = !!(dx || dy);
       for (const m of op.mem) {
         const l = m.l;
         if (m.vec && m.vec.type === 'fill') { const c = mkCanvas(); c.getContext('2d').drawImage(m.mask, dx, dy); m.live = c; renderFill(l, c); }
@@ -734,8 +743,11 @@ const arrangeTool = {
       requestRender(); drawOverlay(); return;
     }
     if (!op || !op.arr) return;
-    const { hit, start, a0 } = op.arr, a = arr;
-    if (hit === 'move') { a.x = Math.round(a0.x + p.x - start.x); a.y = Math.round(a0.y + p.y - start.y); }
+    const { hit, start, a0 } = op.arr, a = arr; op.snapLines = null;
+    if (hit === 'move') {
+      a.x = Math.round(a0.x + p.x - start.x); a.y = Math.round(a0.y + p.y - start.y);
+      const b = aabbOf(a), s = snapBox(b.x, b.y, b.w, b.h, op.arr.snap, e); a.x += s.dx; a.y += s.dy; op.snapLines = s.lines;
+    }
     else if (hit === 'rot') {
       const cx = a0.x + a0.w / 2, cy = a0.y + a0.h / 2; let ang = a0.angle + Math.atan2(p.y - cy, p.x - cx) - Math.atan2(start.y - cy, start.x - cx);
       if (e.shiftKey) ang = Math.round(ang / (Math.PI / 12)) * Math.PI / 12; a.angle = ang;
@@ -753,12 +765,13 @@ const arrangeTool = {
       const mu = (l + r) / 2, mv = (t + b) / 2;
       a.w = Math.max(1, Math.round(w)); a.h = Math.max(1, Math.round(h));
       a.x = Math.round(H0.cx + mu * cs - mv * sn - a.w / 2); a.y = Math.round(H0.cy + mu * sn + mv * cs - a.h / 2);
+      if (snapOn(e) && !a0.angle && !keep && !e.altKey) op.snapLines = snapEdges(a, sgn, op.arr.snap); // only unrotated, free resizes snap
     }
     renderArr(op); syncArrInputs(); drawOverlay();
   },
   up(p) {
     if (op?.gmove) {
-      const o = op; op = null; if (Math.round(p.x - o.start.x) === 0 && Math.round(p.y - o.start.y) === 0) return;
+      const o = op; op = null; if (!o.moved) return;
       for (const m of o.mem) if (m.live) { const url = m.live.toDataURL(); maskCache.set(url, m.live); m.l.vec = clone(m.vec); m.l.vec.mask = url; m.l.vec.bb = contentBounds({ ctx: m.live.getContext('2d') }) || [0, 0, W, H]; renderFill(m.l); }
       pushHistory({ t: 'st', label: 'Move group', before: o.struct, after: snapStruct() }); rebuildLayers(); arr = null; drawOverlay(); return;
     }
@@ -805,6 +818,78 @@ const tools = {
   fill: { down: floodFill }, eyedropper: { down: pickColor }, text: textTool, hand: {}, zoom: {},
 };
 
+// ===== snapping (moving and resizing): edges and centres of the canvas, other layers, and the template's faces
+const SNAP_PX = 6; // how close (in screen pixels) before something snaps
+const COALESCE_TOOLS = new Set(['brush', 'eraser', 'pencil', 'lasso']);
+const VEC_PLACE = new Set(['x', 'y', 'angle', 'flipX', 'flipY', 'w', 'h', '_ox', '_oy']); // where text sits, not what it looks like (text cache key)
+const snapOn = (e) => state.snap && !(e?.ctrlKey || e?.metaKey);
+// axis-aligned box around a (possibly rotated) arrange box
+function aabbOf(a) { const c = arrHandles(a).corners, xs = c.map(q => q.x), ys = c.map(q => q.y), x = Math.min(...xs), y = Math.min(...ys); return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }; }
+function layerBounds(l) {
+  const v = l.vec;
+  if (v?.type === 'path') { const b = pathBBox(allPts(v)); return [b.x, b.y, b.w, b.h]; }
+  if (v && v.type !== 'fill') { const b = aabbOf({ x: v.x, y: v.y, w: v.w, h: v.h, angle: v.angle || 0 }); return [b.x, b.y, b.w, b.h]; }
+  return contentBounds(l);
+}
+function snapTargets(skipIds) {
+  const xs = [0, W / 2, W], ys = [0, H / 2, H];
+  const add = (b) => { if (!b) return; xs.push(b[0], b[0] + b[2] / 2, b[0] + b[2]); ys.push(b[1], b[1] + b[3] / 2, b[1] + b[3]); };
+  for (const l of doc().layers.slice(-40)) if (!skipIds.has(l.id) && layerVisible(l)) add(layerBounds(l));
+  if (isTemplate()) for (const r of regionsFor(state.mode)) if (r.face) add(r.rects[0]);
+  return { xs, ys };
+}
+// the closest target to any of vals, if within thr: { d: how far to shift, t: the target }
+function snapAxis(vals, targets, thr) { let best = null; for (const v of vals) for (const t of targets) { const d = t - v; if (Math.abs(d) <= thr && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t }; } return best; }
+// shift needed so a box's left/centre/right and top/middle/bottom land on targets, plus the guide lines to show
+function snapBox(x, y, w, h, T, e) {
+  if (!snapOn(e) || !T) return { dx: 0, dy: 0, lines: null };
+  const thr = SNAP_PX / state.zoom, sx = snapAxis([x, x + w / 2, x + w], T.xs, thr), sy = snapAxis([y, y + h / 2, y + h], T.ys, thr);
+  return { dx: sx ? Math.round(sx.d) : 0, dy: sy ? Math.round(sy.d) : 0, lines: sx || sy ? { x: sx?.t, y: sy?.t } : null };
+}
+// resizing: snap the edges being dragged (sgn says which), keeping whole pixels
+function snapEdges(a, sgn, T) {
+  const thr = SNAP_PX / state.zoom, L = {};
+  if (sgn[0] < 0) { const s = snapAxis([a.x], T.xs, thr); if (s) { const t = Math.round(s.t); a.w += a.x - t; a.x = t; L.x = s.t; } }
+  if (sgn[0] > 0) { const s = snapAxis([a.x + a.w], T.xs, thr); if (s) { a.w = Math.round(s.t) - a.x; L.x = s.t; } }
+  if (sgn[1] < 0) { const s = snapAxis([a.y], T.ys, thr); if (s) { const t = Math.round(s.t); a.h += a.y - t; a.y = t; L.y = s.t; } }
+  if (sgn[1] > 0) { const s = snapAxis([a.y + a.h], T.ys, thr); if (s) { a.h = Math.round(s.t) - a.y; L.y = s.t; } }
+  a.w = Math.max(1, a.w); a.h = Math.max(1, a.h);
+  return 'x' in L || 'y' in L ? L : null;
+}
+function drawArrBox(o) {
+  const a = ensureArr(); if (a.empty) return;
+  const H_ = arrHandles(a), c = H_.corners, s = 4 / state.zoom;
+  o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.beginPath(); [0, 2, 4, 6].forEach((i, k) => k ? o.lineTo(c[i].x, c[i].y) : o.moveTo(c[i].x, c[i].y)); o.closePath(); o.stroke();
+  o.beginPath(); o.moveTo(c[1].x, c[1].y); o.lineTo(H_.rot.x, H_.rot.y); o.stroke();
+  o.fillStyle = '#fff'; for (const q of c) { o.fillRect(q.x - s, q.y - s, s * 2, s * 2); o.strokeRect(q.x - s, q.y - s, s * 2, s * 2); }
+  o.beginPath(); o.arc(H_.rot.x, H_.rot.y, s * 1.2, 0, Math.PI * 2); o.fill(); o.stroke();
+}
+
+// ===== the Shape (design mode) and Text tools move, resize and rotate shapes/text directly, like the Move tool
+function vecLayerAt(p, type) {
+  for (const l of [...doc().layers].reverse()) {
+    if (l.vec?.type !== type || !layerVisible(l)) continue; const v = l.vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2, a = -(v.angle || 0);
+    const u = (p.x - cx) * Math.cos(a) - (p.y - cy) * Math.sin(a), w_ = (p.x - cx) * Math.sin(a) + (p.y - cy) * Math.cos(a);
+    if (Math.abs(u) <= v.w / 2 + 3 && Math.abs(w_) <= v.h / 2 + 3) return l;
+  }
+  return null;
+}
+// is p on the selected shape/text's box or one of its handles?
+function onVecBox(p, type) { const d = doc(), l = activeLayer(); if (d.noSel || d.activeGroup || l?.vec?.type !== type) return false; const a = ensureArr(); return !a.empty && (arrHit(p) !== 'move' || arrInside(p)); }
+function grabVec(p, e, l) { if (l !== activeLayer() || doc().noSel) selectLayer(l); arrangeTool.down(p, e); if (op) op.viaArr = true; return !!op; }
+const vecCursor = (p, type) => onVecBox(p, type) ? (arrCursor[arrHit(p)] || 'move') : '';
+// Move tool: double-click text to edit it
+arrangeTool.dbl = (p) => { const l = vecLayerAt(p, 'text'); if (!l) return; selectLayer(l); setTool('text'); startTextEdit(l, false); };
+
+// painting/adjusting needs pixels: ask before turning editable text, shapes or fills into a plain layer
+function askRasterize(l) {
+  if (document.querySelector('.rasterize-ask')) return;
+  const what = { text: 'text', shape: 'shape', path: 'path', fill: 'colour fill' }[l.vec.type] || 'layer';
+  const b = el('div', 'confirm-body rasterize-ask');
+  b.textContent = `“${l.name}” is an editable ${what}. To paint on it or change its pixels it has to become a plain image layer, and it can't be edited as ${what} after that.`;
+  dlg('Rasterize layer?', b, { okLabel: 'Rasterize', onOk: () => { flushVecEdit(); endTextEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); toast(`“${l.name}” is now a plain layer - you can paint on it`); } });
+}
+
 // ===== overlay for tools (cursor, marquee preview, ants, arrange box)
 function drawToolOverlay(o) {
   if (selPath) {
@@ -819,19 +904,17 @@ function drawToolOverlay(o) {
   drawPenOverlay(o);
   if (state.tool === 'move' && doc().activeGroup && !doc().noSel) {
     const b = unionBounds(groupMembers(doc().activeGroup)); if (b) { o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.setLineDash([5 / state.zoom, 3 / state.zoom]); o.strokeRect(b[0], b[1], b[2], b[3]); o.setLineDash([]); }
-  } else if (state.tool === 'move' && !doc().noSel) {
-    const a = ensureArr();
-    if (!a.empty) {
-      const H_ = arrHandles(a), c = H_.corners, s = 4 / state.zoom;
-      o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.beginPath(); [0, 2, 4, 6].forEach((i, k) => k ? o.lineTo(c[i].x, c[i].y) : o.moveTo(c[i].x, c[i].y)); o.closePath(); o.stroke();
-      o.beginPath(); o.moveTo(c[1].x, c[1].y); o.lineTo(H_.rot.x, H_.rot.y); o.stroke();
-      o.fillStyle = '#fff'; for (const q of c) { o.fillRect(q.x - s, q.y - s, s * 2, s * 2); o.strokeRect(q.x - s, q.y - s, s * 2, s * 2); }
-      o.beginPath(); o.arc(H_.rot.x, H_.rot.y, s * 1.2, 0, Math.PI * 2); o.fill(); o.stroke();
-    }
-  }
-  if ((state.tool === 'text' || state.tool === 'shape') && activeLayer()?.vec && !doc().noSel && activeLayer().vec.type !== 'fill') {
+  } else if (state.tool === 'move' && !doc().noSel) drawArrBox(o);
+  const vt = state.tool === 'text' || state.tool === 'shape' ? activeLayer()?.vec?.type : null;
+  if ((state.tool === 'text' || state.tool === 'shape') && vt === state.tool && !doc().noSel && !(op && !op.viaArr) && !(vt === 'shape' && state.shape.mode === 'draw')) drawArrBox(o);
+  else if ((state.tool === 'text' || state.tool === 'shape') && activeLayer()?.vec && !doc().noSel && activeLayer().vec.type !== 'fill') {
     const v = activeLayer().vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2;
     o.save(); o.translate(cx, cy); o.rotate(v.angle || 0); o.lineWidth = 1 / state.zoom; o.strokeStyle = textEdit ? '#0099cc' : 'rgba(0,153,204,.7)'; o.setLineDash(textEdit ? [] : [4 / state.zoom, 3 / state.zoom]); o.strokeRect(-v.w / 2 - 2, -v.h / 2 - 2, v.w + 4, v.h + 4); o.restore(); o.setLineDash([]);
+  }
+  if (op?.snapLines) { // guides showing what a move/resize snapped to
+    const L = op.snapLines; o.save(); o.lineWidth = 1 / state.zoom; o.strokeStyle = '#ff4fa3'; o.setLineDash([]); o.beginPath();
+    if (L.x != null) { o.moveTo(L.x, 0); o.lineTo(L.x, H); } if (L.y != null) { o.moveTo(0, L.y); o.lineTo(W, L.y); }
+    o.stroke(); o.restore();
   }
   if (hover && ['brush', 'eraser', 'pencil'].includes(state.tool)) {
     o.lineWidth = 1 / OS;
@@ -922,6 +1005,7 @@ function buildOptions() {
     const X = pos('x'), Y = pos('y'), Wd = size('w'), Hd = size('h'); arrInputs.push(X, Y, Wd, Hd);
     const lock = obBtn(state.arrFixed ? ICONS.lock : ICONS.unlock, 'Keep proportions', () => { state.arrFixed = !state.arrFixed; buildOptions(); });
     lock.classList.add('ob-lock');
+    const snapT = obToggle('Snap', () => state.snap, v => { state.snap = v; }); snapT.title = 'Snap to edges and centres while moving or resizing (hold Ctrl to skip)'; add(snapT);
     add(obLabel('Aspect:'), obSeg([{ v: 'true', text: 'Fixed' }, { v: 'false', text: 'Free' }], () => String(state.arrFixed), v => { state.arrFixed = v === 'true'; buildOptions(); }),
       obLabel('Pos:'), X, Y, obLabel('Size:'), Wd, lock, Hd,
       el('span', 'ob-gap'),
@@ -1011,7 +1095,8 @@ scroller.addEventListener('pointermove', e => {
   $('#stPos').textContent = `${Math.floor(p.x)}, ${Math.floor(p.y)}`;
   $('#stRegion').textContent = rg ? rg.label : '';
   if (pointerDown) {
-    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    // painting needs every in-between point; moving/resizing only needs the latest one (keeps dragging text smooth)
+    const evs = COALESCE_TOOLS.has(state.tool) && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ce of (evs.length ? evs : [e])) tools[state.tool].move?.(toPt(ce), ce.pointerType ? ce : e);
   } else tools[state.tool].hover?.(p, e);
   drawOverlay();
@@ -1290,7 +1375,10 @@ function renderVec(l) {
   const v = l.vec, c = l.ctx; c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H);
   if (v.type === 'shape') drawShapeVec(c, v);
   else {
-    const r = renderTextCanvas(v); v.w = r.c.width; v.h = r.c.height; v._ox = r.ox; v._oy = r.oy;
+    // the rendered text is cached until its content or style changes, so moving/rotating it is just a redraw
+    const key = JSON.stringify(v, (k, x) => VEC_PLACE.has(k) ? undefined : x) + document.fonts.check(textFont(v));
+    if (l._tc?.key !== key) l._tc = { key, r: renderTextCanvas(v) };
+    const r = l._tc.r; v.w = r.c.width; v.h = r.c.height; v._ox = r.ox; v._oy = r.oy;
     c.translate(v.x + v.w / 2, v.y + v.h / 2); c.rotate(v.angle || 0); c.scale(v.flipX ? -1 : 1, v.flipY ? -1 : 1); c.drawImage(r.c, -v.w / 2, -v.h / 2);
   }
   c.restore();
@@ -1328,11 +1416,15 @@ function shapeBox(a, b, shift, type) {
   let x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y), dir = (b.x - a.x) * (b.y - a.y) >= 0 ? 1 : -1;
   if (shift && type === 'line') { const ang = Math.round(Math.atan2(b.y - a.y, b.x - a.x) / (Math.PI / 4)) * Math.PI / 4, len = Math.hypot(b.x - a.x, b.y - a.y), ex = a.x + Math.cos(ang) * len, ey = a.y + Math.sin(ang) * len; x = Math.min(a.x, ex); y = Math.min(a.y, ey); w = Math.abs(ex - a.x); h = Math.abs(ey - a.y); dir = (ex - a.x) * (ey - a.y) >= 0 ? 1 : -1; }
   else if (shift) { const m = Math.max(w, h); w = h = m; x = b.x < a.x ? a.x - m : a.x; y = b.y < a.y ? a.y - m : a.y; }
-  return { x, y, w: Math.max(type === 'line' ? 0 : 1, w), h: Math.max(type === 'line' ? 0 : 1, h), dir };
+  return { x: Math.round(x), y: Math.round(y), w: Math.max(type === 'line' ? 0 : 1, Math.round(w)), h: Math.max(type === 'line' ? 0 : 1, Math.round(h)), dir };
 }
 function newShapeVec(box) { const S = state.shape; return { type: 'shape', shape: S.shape, ...box, angle: 0, fill: clone(S.fill), stroke: clone(S.stroke), strokeW: S.strokeW, radius: S.radius, points: S.points, inner: S.inner }; }
 const shapeToolV = {
-  down(p) {
+  down(p, e) {
+    if (state.shape.mode === 'design') { // grab the selected shape (or another one) instead of drawing over it
+      if (onVecBox(p, 'shape')) { grabVec(p, e, activeLayer()); return; }
+      const hit = vecLayerAt(p, 'shape'); if (hit) { grabVec(p, e, hit); return; }
+    }
     if (state.shape.mode === 'draw') { op = beginOp(); if (!op) return; op.start = p; return; }
     op = { struct: snapStruct(), start: p };
     const d = doc(), l = makeLayer(({ rect: 'Rectangle', round: 'Rounded rectangle', ellipse: 'Ellipse', line: 'Line', star: 'Star' })[state.shape.shape]);
@@ -1340,12 +1432,14 @@ const shapeToolV = {
     d.layers.splice(d.layers.indexOf(activeLayer()) + 1, 0, l); d.activeId = l.id; op.l = l; rebuildLayers();
   },
   move(p, e) {
+    if (op?.viaArr) { arrangeTool.move(p, e); return; }
     if (!op || !op.start) return;
     const box = shapeBox(op.start, p, e.shiftKey, state.shape.shape);
     if (state.shape.mode === 'draw') { shX.clearRect(0, 0, W, H); drawShapeVec(shX, newShapeVec(box)); compositeOnto(op, shapeC); return; }
     Object.assign(op.l.vec, box); renderVec(op.l); requestRender();
   },
   up(p, e) {
+    if (op?.viaArr) { arrangeTool.up(p, e); buildOptions(); return; }
     if (!op || !op.start) return; const o = op; op = null;
     const tiny = Math.hypot(p.x - o.start.x, p.y - o.start.y) < 2;
     if (state.shape.mode === 'draw') { if (tiny) { restoreOp(o); requestRender(); return; } this.move.call({}, p, e); op = o; shX.clearRect(0, 0, W, H); drawShapeVec(shX, newShapeVec(shapeBox(o.start, p, e.shiftKey, state.shape.shape))); compositeOnto(o, shapeC); op = null; addRecent(paintCSS(state.shape.fill).startsWith('#') ? state.shape.fill.color : state.fg); labelled('Draw shape', () => commitOp(o)); return; }
@@ -1353,6 +1447,7 @@ const shapeToolV = {
     Object.assign(o.l.vec, shapeBox(o.start, p, e.shiftKey, state.shape.shape)); renderVec(o.l);
     pushHistory({ t: 'st', label: 'Add shape', before: o.struct, after: snapStruct() }); rebuildLayers(); buildOptions();
   },
+  hover(p) { stack.style.cursor = state.shape.mode === 'design' ? vecCursor(p, 'shape') : ''; },
 };
 function shapeOptions(add) {
   const S = state.shape, L = () => activeVec('shape');
@@ -1411,25 +1506,29 @@ function newTextLayer(p, txt = 'Your text here') {
   if (state.tool !== 'text') setTool('text'); else buildOptions();
   startTextEdit(l, true);
 }
-function textLayerAt(p) {
-  for (const l of [...doc().layers].reverse()) {
-    if (l.vec?.type !== 'text' || !l.visible) continue; const v = l.vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2, a = -(v.angle || 0);
-    const u = (p.x - cx) * Math.cos(a) - (p.y - cy) * Math.sin(a), w_ = (p.x - cx) * Math.sin(a) + (p.y - cy) * Math.cos(a);
-    if (Math.abs(u) <= v.w / 2 + 3 && Math.abs(w_) <= v.h / 2 + 3) return l;
-  }
-  return null;
-}
-function confirmDlg(title, msg, okLabel, onOk) { const b = el('div', 'confirm-body'); b.textContent = msg; dlg(title, b, { okLabel, onOk }); }
+const textLayerAt = (p) => vecLayerAt(p, 'text');function confirmDlg(title, msg, okLabel, onOk) { const b = el('div', 'confirm-body'); b.textContent = msg; dlg(title, b, { okLabel, onOk }); }
 const textToolV = {
-  down(p) {
-    const hit = textLayerAt(p);
-    if (textEdit && hit === textEdit.l) return;
-    if (textEdit) { endTextEdit(); if (!hit) return; }
-    if (hit) { doc().activeId = hit.id; rebuildLayers(); buildOptions(); startTextEdit(hit, false); return; }
+  // click text to edit it, drag it (or its handles) to move/resize/rotate it, click empty canvas to add text
+  down(p, e) {
+    const onBox = onVecBox(p, 'text'), target = onBox ? activeLayer() : vecLayerAt(p, 'text');
+    if (target) {
+      const handle = onBox && arrHit(p) !== 'move';
+      if (textEdit && target === textEdit.l && !handle) return; // clicks inside the text being typed stay in the text box
+      if (textEdit) endTextEdit();
+      if (grabVec(p, e, target) && !handle) op.textTap = { l: target, start: p };
+      return;
+    }
+    if (textEdit) { endTextEdit(); return; }
     confirmDlg('Add text', 'Do you want to add a new Text layer?', 'Add', () => newTextLayer(p));
   },
-};
-const TEXT_PRESETS = [
+  move(p, e) { if (op?.viaArr) arrangeTool.move(p, e); },
+  up(p, e) {
+    if (!op?.viaArr) return;
+    const t = op.textTap, tap = t && Math.hypot(p.x - t.start.x, p.y - t.start.y) < 3 ? t.l : null;
+    arrangeTool.up(p, e); buildOptions(); if (tap) startTextEdit(tap, false);
+  },
+  hover(p) { stack.style.cursor = textEdit && arrHit(p) === 'move' ? '' : vecCursor(p, 'text'); },
+};const TEXT_PRESETS = [
   { name: 'Plain white', fx: {}, fill: { type: 'color', color: '#ffffff' }, family: 'Oswald' },
   { name: 'Black outline', fx: { outline: { on: true, color: '#000000', width: 4 } }, fill: { type: 'color', color: '#ffffff' }, family: 'Bebas Neue' },
   { name: 'Drop shadow', fx: { shadow: { on: true, color: '#000000', blur: 4, dist: 5, angle: 45, opacity: 75 } }, fill: { type: 'color', color: '#ffd400' }, family: 'Anton' },
@@ -2764,6 +2863,11 @@ function transformAll(label, fn) {
 const rotateCanvas = (dir) => transformAll(dir > 0 ? 'Rotate right' : 'Rotate left', (c, s) => { c.translate(W / 2, H / 2); c.rotate(dir * Math.PI / 2); c.drawImage(s, -W / 2, -H / 2); });
 const flipCanvas = (h) => transformAll(h ? 'Flip horizontal' : 'Flip vertical', (c, s) => { if (h) { c.translate(W, 0); c.scale(-1, 1); } else { c.translate(0, H); c.scale(1, -1); } c.drawImage(s, 0, 0); });
 function flipLayer(h) {
+  const vl = activeLayer();
+  if (vl.vec && vl.vec.type !== 'fill') { // editable layers flip as themselves (mirrored across the canvas, like pixels)
+    arrApply(h ? 'Flip layer horizontal' : 'Flip layer vertical', s => { if (h) { s.flipX = !s.flipX; s.x = W - s.x - s.w; } else { s.flipY = !s.flipY; s.y = H - s.y - s.h; } s.angle = -s.angle; });
+    return;
+  }
   labelled(h ? 'Flip layer horizontal' : 'Flip layer vertical', () => {
     const o = beginOp(); if (!o) return; const s = snapCanvas(o.before), c = o.l.ctx;
     c.save(); c.clearRect(0, 0, W, H); if (h) { c.translate(W, 0); c.scale(-1, 1); } else { c.translate(0, H); c.scale(1, -1); } c.drawImage(s, 0, 0); c.restore(); commitOp(o);
@@ -3546,7 +3650,7 @@ function showWhatsNew(ver, items) {
   addRecent('#d23c3c'); addRecent('#1f2a44'); addRecent('#ffffff'); addRecent('#111111');
   await showHome();
   maybeShowWhatsNew(hadData);
-})();window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };
+})();window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked, l.vec ? { type: l.vec.type, x: l.vec.x, y: l.vec.y, w: l.vec.w, h: l.vec.h, size: l.vec.size, flipX: !!l.vec.flipX, fill: l.vec.fill?.color } : null]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };
 $('#btnFullscreen').onclick = () => { $('#panelsMenu').hidden = true; if (native?.toggleFullscreen) native.toggleFullscreen(); else if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); };
 // F11 normally never reaches the page (main.js toggles fullscreen first); this is the fallback
 document.addEventListener('keydown', (e) => { if (e.key === 'F11' && !e.repeat) { e.preventDefault(); $('#btnFullscreen').click(); } }, true);
