@@ -306,7 +306,7 @@ function obSeg(items, get, set) {
   return g;
 }
 let popEl = null, popAnchor = null;
-function closePop() { if (popEl) { popEl.remove(); popEl = null; popAnchor = null; } }
+function closePop() { if (popEl) { const p = popEl; fadeOut(p, () => p.remove()); popEl = null; popAnchor = null; } }
 function openPop(anchor, content, { width } = {}) {
   if (popAnchor === anchor) { closePop(); return; }
   closePop();
@@ -2525,7 +2525,7 @@ function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = '
   else makeDraggable(head, (dx, dy) => { px += dx; py += dy; place(); }, () => { dlgPos = { x: px, y: py }; });
   const outside = (e) => { if (!box.contains(e.target)) doCancel(); };
   if (outsideClose) setTimeout(() => document.addEventListener('pointerdown', outside, true));
-  const close = () => { wrap.remove(); document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside, true); };
+  const close = () => { fadeOut(box, () => wrap.remove()); document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside, true); };
   const doCancel = () => { onCancel?.(); close(); };
   const doOk = () => { if (onOk?.() !== false) close(); };
   const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); doCancel(); } else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.matches('input[type=text], input:not([type])')) { e.stopPropagation(); e.preventDefault(); doOk(); } };
@@ -3033,6 +3033,34 @@ addTip($('#colFg'), ['Primary colour', 'Used by the brush, pencil, fill, shapes 
 addTip($('#colBg'), ['Secondary colour', 'Used as the end colour of gradients.', '']);
 addTip($('#btnSwap'), ['Swap colours', 'Switch the primary and secondary colours.', 'X']);
 
+// ------------------------------------------------------------------ motion helpers (styles.css "motion" has the CSS side)
+const motionOK = () => !matchMedia('(prefers-reduced-motion: reduce)').matches;
+// a quick fade before a popup is removed (instant when animations are off)
+function fadeOut(node, done) {
+  if (!motionOK() || !node.isConnected) { done(); return; }
+  node.style.pointerEvents = 'none';
+  node.animate([{ opacity: 1 }, { opacity: 0, scale: .97 }], { duration: 110, easing: 'ease-in' }).finished.then(done, done);
+}
+// minimising/restoring a panel slides it like a drawer, and the panels around it glide to their new heights.
+// fn makes the change; heights are measured before and after and animated between (only ~220ms of layout work).
+function animatePanels(target, fn) {
+  if (!motionOK()) { fn(); return; }
+  const ps = panels().filter(x => !x.hidden && !x.classList.contains('floating')), h0 = new Map(ps.map(x => [x, x.getBoundingClientRect().height]));
+  fn();
+  const ease = 'cubic-bezier(.2,.8,.2,1)';
+  for (const x of ps) {
+    const a = h0.get(x), b = x.getBoundingClientRect().height;
+    if (Math.abs(a - b) < 1) continue;
+    x._drawer?.cancel(); x.classList.add('drawer-anim');
+    const an = x._drawer = x.animate([{ height: a + 'px', flex: 'none', minHeight: '0px' }, { height: b + 'px', flex: 'none', minHeight: '0px' }], { duration: 220, easing: ease });
+    const end = () => { if (x._drawer === an) { x._drawer = null; x.classList.remove('drawer-anim'); } };
+    an.finished.then(end, end);
+  }
+  const body = target.querySelector('.panel-body');
+  if (target.classList.contains('collapsed')) body.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: 'ease-in' });
+  else body.animate([{ opacity: 0, translate: '0 -6px' }, { opacity: 1, translate: '0 0' }], { duration: 220, easing: ease });
+}
+
 // ------------------------------------------------------------------ panels & layout (dockable / floating)
 const side = $('#side'), mainEl = $('.main');
 const panels = () => $$('.panel[id$="Panel"]');
@@ -3147,12 +3175,12 @@ panels().forEach(p => {
   });
   new ResizeObserver(() => { if (p.classList.contains('floating') && !p.classList.contains('collapsed')) p.dataset.fh = p.getBoundingClientRect().height; }).observe(p);
   p.addEventListener('pointerup', () => { if (p.classList.contains('floating')) saveLayout(); });
-  p.querySelector('[data-collapse]').onclick = () => {
+  p.querySelector('[data-collapse]').onclick = () => animatePanels(p, () => {
     const fl = p.classList.contains('floating'), r0 = p.getBoundingClientRect();
     p.classList.toggle('collapsed');
     if (fl) { p.style.height = p.classList.contains('collapsed') ? '' : (p.dataset.fh || 260) + 'px'; const r1 = p.getBoundingClientRect(); placeFloat(p, r0.left, r0.bottom - r1.height); } // keep the bottom edge where it was
     saveLayout();
-  };
+  });
   p.querySelector('[data-close]').onclick = () => { p.hidden = true; syncPanelMenu(); saveLayout(); };
   head.ondblclick = (e) => { if (!e.target.closest('button')) p.querySelector('[data-collapse]').click(); };
 });
@@ -3176,7 +3204,7 @@ window.addEventListener('resize', () => panels().forEach(p => { if (p.classList.
 
 // ------------------------------------------------------------------ right-click layer properties
 let ctxPop = null;
-function closeLayerPop() { ctxPop?.remove(); ctxPop = null; }
+function closeLayerPop() { if (ctxPop) { const p = ctxPop; fadeOut(p, () => p.remove()); } ctxPop = null; }
 function openLayerPop(item, x, y) {
   closeLayerPop();
   const isG = !!item.group, obj = isG ? item.group : item.layer, d = doc();
@@ -3336,12 +3364,24 @@ function applySize(w, h) {
   gradMap = null;
   return true;
 }
+let homeFade = null; // the fade-out while leaving Home
 async function showHome() {
-  if (!homeOpen()) { leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
+  const leaving = !!homeFade; if (homeFade) { homeFade.cancel(); homeFade = null; }
+  const opening = !homeOpen() || leaving;
+  if (opening) { leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
   await saveDirty(); // so the cards show the latest pictures
   await renderHome();
+  if (opening) { const g = $('#projGrid'); g.classList.add('intro'); setTimeout(() => g.classList.remove('intro'), 700); }
 }
-function hideHome() { if (!homeOpen()) return; homeEl.hidden = true; $('#whatsNew')?.close(); requestAnimationFrame(() => drawOverlay()); }
+function hideHome() {
+  if (!homeOpen() || homeFade) return;
+  $('#whatsNew')?.close();
+  const done = () => { homeEl.hidden = true; homeEl.style.pointerEvents = ''; homeFade = null; requestAnimationFrame(() => drawOverlay()); };
+  if (!motionOK()) { done(); return; }
+  homeEl.style.pointerEvents = 'none';
+  const a = homeFade = homeEl.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: 'ease-in' });
+  a.finished.then(() => { if (homeFade === a) done(); }, () => { homeEl.style.pointerEvents = ''; });
+}
 function timeAgo(t) {
   if (!t) return ''; const s = (Date.now() - t) / 1000;
   return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : s < 172800 ? 'yesterday' : new Date(t).toLocaleDateString();
@@ -3351,7 +3391,7 @@ async function renderHome() {
   $('#homeBack').hidden = !state.sets.some(s => !s.temp);
   $('#homeEmpty').hidden = list.length > 0;
   const grid = $('#projGrid'); grid.innerHTML = '';
-  for (const m of list) grid.append(projectCard(m));
+  list.forEach((m, i) => { const c = projectCard(m); c.style.setProperty('--i', Math.min(i, 12)); grid.append(c); });
 }
 function projectCard(m) {
   const card = el('div', 'proj'); card.tabIndex = 0;
@@ -3488,7 +3528,7 @@ function showWhatsNew(ver, items) {
   const ok = el('button', 'primary wn-ok'); ok.textContent = 'Got it'; card.append(ok);
   const outside = (e) => { if (!card.contains(e.target)) card.close(); };
   const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); card.close(); } };
-  card.close = () => { card.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc, true); };
+  card.close = () => { card.id = ''; fadeOut(card, () => card.remove()); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc, true); };
   x.onclick = ok.onclick = () => card.close();
   document.body.append(card);
   setTimeout(() => { document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', esc, true); });
@@ -3507,3 +3547,6 @@ function showWhatsNew(ver, items) {
   await showHome();
   maybeShowWhatsNew(hadData);
 })();window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };
+$('#btnFullscreen').onclick = () => { $('#panelsMenu').hidden = true; if (native?.toggleFullscreen) native.toggleFullscreen(); else if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); };
+// F11 normally never reaches the page (main.js toggles fullscreen first); this is the fallback
+document.addEventListener('keydown', (e) => { if (e.key === 'F11' && !e.repeat) { e.preventDefault(); $('#btnFullscreen').click(); } }, true);

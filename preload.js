@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('native', {
   projectDelete: (id) => ipcRenderer.invoke('project-delete', id),
   onUpdated: (cb) => ipcRenderer.on('app-updated', (e, info) => cb(info)),
   relaunch: () => ipcRenderer.invoke('relaunch'),
+  toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen'),
   updateCheck: (manual) => ipcRenderer.invoke('update-check', manual),
   updateSkip: (ver) => ipcRenderer.invoke('update-skip', ver),
   updateInstall: () => ipcRenderer.invoke('update-install'),

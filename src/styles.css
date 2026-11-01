@@ -691,3 +691,29 @@ body.canvas-mode #panelsMenu label:has([data-panel="previewPanel"]) { display: n
 /* ---- Home: version, update check and messages */
 .home-ver { color: var(--muted); font-size: 12px; }
 .home-msg { color: #cfcfcf; font-size: 12.5px; transition: opacity .4s; opacity: 0; margin-right: 6px; }
+
+/* ===================== motion =====================
+   Short and cheap: popups only animate opacity/scale/translate (GPU-composited). Layout is only animated
+   while a panel opens or closes (see animatePanels in app.js). Everything is off with "reduce motion". */
+:root { --ease-out: cubic-bezier(.2, .8, .2, 1); }
+@keyframes pop-in { from { opacity: 0; scale: .96; translate: 0 4px; } }
+@keyframes drop-in { from { opacity: 0; translate: 0 -4px; } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes rise-in { from { opacity: 0; translate: 0 8px; } }
+
+button, .stab, .tab, .proj, .home-big, .layer, .hist, .mb-entry, .np-type { transition: background-color .12s, border-color .12s, color .12s, outline-color .12s; }
+
+.dlg-wrap .dlg, .modal:not([hidden]) .modal-box, .ob-pop, .layer-pop, .whatsnew { animation: pop-in .16s var(--ease-out); }
+.modal:not(.dlg-wrap):not([hidden]) { animation: fade-in .16s ease-out; }
+.mb-item.open .mb-drop, .dropdown:not([hidden]) { animation: drop-in .12s var(--ease-out); }
+.layer-menu:not([hidden]) { animation: pop-in .12s var(--ease-out); transform-origin: bottom left; }
+.home:not([hidden]) { animation: fade-in .18s ease-out; }
+.proj-grid.intro .proj { animation: rise-in .26s var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 25ms); }
+
+/* a panel sliding open/shut: keep its content visible and clipped while the height animates */
+.panel.drawer-anim { overflow: hidden; }
+.panel.drawer-anim .panel-body { display: flex !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
+}

@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.5.0', notes: [
+    'Smoother feel: panels slide open and shut like drawers, and popups, menus and the Home page fade in and out.',
+    'Full screen with F11, or Panels → Full screen.',
+  ] },
   { version: '0.4.1', notes: [
     'Image size and Canvas size now really resize Normal projects (Ctrl+Z undoes it). Templates stay at 585 × 559.',
     'Check for updates right from the Home page.',

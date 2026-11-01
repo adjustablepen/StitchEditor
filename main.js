@@ -13,6 +13,8 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
   win.webContents.on('before-input-event', (e, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools();
+    // F11 fullscreen - Electron's default menu normally provides it, but the app has no menu
+    if (input.type === 'keyDown' && input.key === 'F11' && !input.isAutoRepeat) { e.preventDefault(); win.setFullScreen(!win.isFullScreen()); }
   });
 }
 
@@ -122,6 +124,7 @@ function watchForUpdates() {
   } catch (err) { console.error('watch failed', err); }
 }
 ipcMain.handle('relaunch', () => { app.relaunch(); app.exit(0); });
+ipcMain.handle('toggle-fullscreen', (e) => { const w = BrowserWindow.fromWebContents(e.sender); w?.setFullScreen(!w.isFullScreen()); });
 
 // ------------------------------------------------------------------ updates from GitHub releases (adjustablepen/StitchEditor)
 const UPDATE_REPO = 'adjustablepen/StitchEditor';
