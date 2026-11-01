@@ -80,6 +80,9 @@ Section "Install"
   File /r "${SRC}\*.*"
   File "/oname=$INSTDIR\Stitch Editor.ico" "installer.ico"
   WriteUninstaller "$INSTDIR\Uninstall ${APP}.exe"
+  ; Windows caches an exe's name the first time it runs; older installs cached "Electron", so clear it
+  DeleteRegValue HKCU "Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache" "$INSTDIR\${EXE}.FriendlyAppName"
+  DeleteRegValue HKCU "Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache" "$INSTDIR\${EXE}.ApplicationCompany"
   CreateShortcut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\${EXE}" "" "$INSTDIR\${APP}.ico" 0
 
   WriteRegStr HKCU "${UNKEY}" "DisplayName" "${APP}"
