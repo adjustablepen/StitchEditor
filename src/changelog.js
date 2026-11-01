@@ -1,5 +1,14 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.6.1', notes: [
+    'Long brush and pencil strokes no longer lag.',
+    'Painting on text or a shape offers to paint on a new layer above it instead.',
+    'Clicking off text or a shape just deselects it. Click again to add a new one.',
+    'While typing, text shows just its outline. Resize and rotate it once you are done.',
+    'Resize handles stay lined up with text as it grows, and dragging one side keeps the other side in place.',
+    'Pixel-only actions are greyed out while text or a shape is selected.',
+    'Stitch Editor opens straight onto the Home page, and popups grow from their centre.',
+  ] },
   { version: '0.6.0', notes: [
     'Snapping: moving or resizing lines things up with the canvas edges and centre, other layers, and the template outlines. Hold Ctrl to skip it, or turn Snap off in the Move tool.',
     'Move, resize and rotate shapes with the Shape tool, and text with the Text tool - no need to switch to Move. Click text to edit it, drag it to move it.',

@@ -577,6 +577,12 @@ function strokeTo(p) {
   op.carry = t - dist; op.last = p;
 }
 function applyBrush() { compositeOnto(op, strokeC, { erase: state.tool === 'eraser', alpha: brushOf().opacity / 100 }); }
+// putting the stroke onto the layer touches the whole canvas, so do it at most once per frame (stamping stays per event)
+function compositeSoon(fn) {
+  if (!op) return; op.pendingComp = fn;
+  if (!op.compRaf) { const o = op; o.compRaf = requestAnimationFrame(() => { o.compRaf = 0; const f = o.pendingComp; o.pendingComp = null; if (op === o) f?.(); }); }
+}
+function flushComposite(o) { if (o.compRaf) { cancelAnimationFrame(o.compRaf); o.compRaf = 0; } const f = o.pendingComp; o.pendingComp = null; f?.(); }
 const penPressure = (e) => (e.pointerType === 'pen' && e.pressure > 0) ? e.pressure : null;
 const brushTool = {
   down(p, e) {
@@ -588,8 +594,8 @@ const brushTool = {
     else { op.last = p; op.carry = 0; stampAt(p); op.carry = Math.max(.5, brushOf().size * Math.max(1, brushOf().step) / 100); }
     applyBrush();
   },
-  move(p, e) { if (!op || !op.tips) return; p.pr = penPressure(e); strokeTo(p); applyBrush(); },
-  up() { if (!op || !op.tips) return; lastPoint = op.last; commitOp(op); op = null; },
+  move(p, e) { if (!op || !op.tips) return; p.pr = penPressure(e); strokeTo(p); compositeSoon(applyBrush); },
+  up() { if (!op || !op.tips) return; flushComposite(op); lastPoint = op.last; commitOp(op); op = null; },
 };
 let lastPoint = null;
 // pencil: pixel-perfect squares
@@ -602,8 +608,8 @@ function pencilSeg(a, b) {
 }
 const pencilTool = {
   down(p, e) { op = beginOp(); if (!op) return; addRecent(state.fg); sctx.clearRect(0, 0, W, H); const s = e.shiftKey && lastPoint ? lastPoint : p; pencilSeg(s, p); op.last = p; compositeOnto(op, strokeC, { alpha: state.opacity }); },
-  move(p) { if (!op) return; pencilSeg(op.last, p); op.last = p; compositeOnto(op, strokeC, { alpha: state.opacity }); },
-  up() { if (!op) return; lastPoint = op.last; commitOp(op); op = null; },
+  move(p) { if (!op) return; pencilSeg(op.last, p); op.last = p; compositeSoon(() => compositeOnto(op, strokeC, { alpha: state.opacity })); },
+  up() { if (!op) return; flushComposite(op); lastPoint = op.last; commitOp(op); op = null; },
 };
 
 // ===== shapes / gradient (draw into a scratch canvas, then composite through region + selection)
@@ -657,7 +663,11 @@ let arr = null, editVersion = 0;
 const bumpEdit = () => { editVersion++; };
 function ensureArr() {
   const l = activeLayer();
-  if (arr && arr.layerId === l.id && arr.version === editVersion) return arr;
+  if (arr && arr.layerId === l.id && arr.version === editVersion) {
+    // text grows while you type without an edit-version bump, so keep the handles in step with the layer
+    const v = l.vec; if (arr.vec && !arr.path && v && v.type !== 'fill' && !op?.arr) Object.assign(arr, { x: v.x, y: v.y, w: Math.max(1, v.w), h: Math.max(1, v.h), angle: v.angle || 0, flipX: !!v.flipX, flipY: !!v.flipY });
+    return arr;
+  }
   if (l.vec?.type === 'path') { const b = pathBBox(allPts(l.vec)); arr = { layerId: l.id, version: editVersion, vec: true, path: true, x: b.x, y: b.y, w: b.w, h: b.h, angle: 0, flipX: false, flipY: false }; return arr; }
   if (l.vec && l.vec.type !== 'fill') { const v = l.vec; arr = { layerId: l.id, version: editVersion, vec: true, x: v.x, y: v.y, w: Math.max(1, v.w), h: Math.max(1, v.h), angle: v.angle || 0, flipX: !!v.flipX, flipY: !!v.flipY }; return arr; }
   const srcL = l.vec?.type === 'fill' ? { ctx: maskCanvas(l.vec.mask).getContext('2d'), canvas: maskCanvas(l.vec.mask) } : l;
@@ -682,7 +692,14 @@ function renderArr(o) {
     }
     else { v.w = a.w; v.h = a.h; }
     Object.assign(v, { x: a.x, y: a.y, angle: a.angle, flipX: a.flipX, flipY: a.flipY }); renderVec(o.l);
-    if (v.type === 'text') { a.w = v.w; a.h = v.h; }
+    if (v.type === 'text') {
+      // text scales as a whole, so keep the edge opposite the dragged handle where it was
+      const b = o.vb;
+      if (b && Math.abs(a.x + a.w - (b.x + b.w)) < 1 && Math.abs(a.x - b.x) >= 1) v.x = Math.round(a.x + a.w - v.w);
+      if (b && Math.abs(a.y + a.h - (b.y + b.h)) < 1 && Math.abs(a.y - b.y) >= 1) v.y = Math.round(a.y + a.h - v.h);
+      if (v.x !== a.x || v.y !== a.y) renderVec(o.l);
+      a.x = v.x; a.y = v.y; a.w = v.w; a.h = v.h;
+    }
     requestRender(); return;
   }
   const a = arr, c = o.l.ctx; c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H);
@@ -882,9 +899,17 @@ const vecCursor = (p, type) => onVecBox(p, type) ? (arrCursor[arrHit(p)] || 'mov
 arrangeTool.dbl = (p) => { const l = vecLayerAt(p, 'text'); if (!l) return; selectLayer(l); setTool('text'); startTextEdit(l, false); };
 
 // painting/adjusting needs pixels: ask before turning editable text, shapes or fills into a plain layer
+const PAINT_TOOLS = new Set(['brush', 'pencil', 'gradient', 'shape']);
 function askRasterize(l) {
   if (document.querySelector('.rasterize-ask')) return;
   const what = { text: 'text', shape: 'shape', path: 'path', fill: 'colour fill' }[l.vec.type] || 'layer';
+  if (PAINT_TOOLS.has(state.tool)) { // painting over text/shapes: offer a fresh layer on top (keeps them editable)
+    const b = el('div', 'confirm-body rasterize-ask');
+    b.textContent = `“${l.name}” is an editable ${what}, so it can't be painted on. Paint on a new layer above it instead?`;
+    dlg('Paint on a new layer?', b, { okLabel: 'New layer', onOk: () => { $('#lyAdd').click(); toast('New layer added - paint away'); },
+      extra: [{ label: 'Rasterize instead', run: () => { flushVecEdit(); endTextEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); } }] });
+    return;
+  }
   const b = el('div', 'confirm-body rasterize-ask');
   b.textContent = `“${l.name}” is an editable ${what}. To paint on it or change its pixels it has to become a plain image layer, and it can't be edited as ${what} after that.`;
   dlg('Rasterize layer?', b, { okLabel: 'Rasterize', onOk: () => { flushVecEdit(); endTextEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); toast(`“${l.name}” is now a plain layer - you can paint on it`); } });
@@ -906,7 +931,7 @@ function drawToolOverlay(o) {
     const b = unionBounds(groupMembers(doc().activeGroup)); if (b) { o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.setLineDash([5 / state.zoom, 3 / state.zoom]); o.strokeRect(b[0], b[1], b[2], b[3]); o.setLineDash([]); }
   } else if (state.tool === 'move' && !doc().noSel) drawArrBox(o);
   const vt = state.tool === 'text' || state.tool === 'shape' ? activeLayer()?.vec?.type : null;
-  if ((state.tool === 'text' || state.tool === 'shape') && vt === state.tool && !doc().noSel && !(op && !op.viaArr) && !(vt === 'shape' && state.shape.mode === 'draw')) drawArrBox(o);
+  if ((state.tool === 'text' || state.tool === 'shape') && vt === state.tool && !doc().noSel && !(op && !op.viaArr) && !(vt === 'shape' && state.shape.mode === 'draw') && !(vt === 'text' && textEdit)) drawArrBox(o); // while typing: outline only
   else if ((state.tool === 'text' || state.tool === 'shape') && activeLayer()?.vec && !doc().noSel && activeLayer().vec.type !== 'fill') {
     const v = activeLayer().vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2;
     o.save(); o.translate(cx, cy); o.rotate(v.angle || 0); o.lineWidth = 1 / state.zoom; o.strokeStyle = textEdit ? '#0099cc' : 'rgba(0,153,204,.7)'; o.setLineDash(textEdit ? [] : [4 / state.zoom, 3 / state.zoom]); o.strokeRect(-v.w / 2 - 2, -v.h / 2 - 2, v.w + 4, v.h + 4); o.restore(); o.setLineDash([]);
@@ -1424,12 +1449,13 @@ const shapeToolV = {
     if (state.shape.mode === 'design') { // grab the selected shape (or another one) instead of drawing over it
       if (onVecBox(p, 'shape')) { grabVec(p, e, activeLayer()); return; }
       const hit = vecLayerAt(p, 'shape'); if (hit) { grabVec(p, e, hit); return; }
+      if (!doc().noSel && activeLayer()?.vec?.type === 'shape') { deselectLayers(); return; } // first click off a shape deselects it
     }
     if (state.shape.mode === 'draw') { op = beginOp(); if (!op) return; op.start = p; return; }
     op = { struct: snapStruct(), start: p };
     const d = doc(), l = makeLayer(({ rect: 'Rectangle', round: 'Rounded rectangle', ellipse: 'Ellipse', line: 'Line', star: 'Star' })[state.shape.shape]);
     l.kind = 'Shape'; l.vec = newShapeVec({ x: p.x, y: p.y, w: 1, h: 1, dir: 1 });
-    d.layers.splice(d.layers.indexOf(activeLayer()) + 1, 0, l); d.activeId = l.id; op.l = l; rebuildLayers();
+    d.layers.splice(d.layers.indexOf(activeLayer()) + 1, 0, l); d.activeId = l.id; d.noSel = false; d.sel = new Set([l.id]); op.l = l; rebuildLayers();
   },
   move(p, e) {
     if (op?.viaArr) { arrangeTool.move(p, e); return; }
@@ -1501,7 +1527,7 @@ function newTextLayer(p, txt = 'Your text here') {
   const before = snapStruct(), d = doc(), l = makeLayer('Text'); l.kind = 'Text';
   l.vec = { type: 'text', text: txt, x: 0, y: 0, angle: 0, ...clone(state.textDef) };
   renderVec(l); l.vec.x = Math.round(Math.max(0, Math.min(W - l.vec.w, p.x - l.vec.w / 2))); l.vec.y = Math.round(Math.max(0, Math.min(H - l.vec.h, p.y - l.vec.h / 2))); renderVec(l);
-  d.layers.splice(d.layers.indexOf(activeLayer()) + 1, 0, l); d.activeId = l.id;
+  d.layers.splice(d.layers.indexOf(activeLayer()) + 1, 0, l); d.activeId = l.id; d.noSel = false; d.sel = new Set([l.id]);
   pushHistory({ t: 'st', label: 'Add text', before, after: snapStruct() }); rebuildLayers(); requestRender();
   if (state.tool !== 'text') setTool('text'); else buildOptions();
   startTextEdit(l, true);
@@ -1509,16 +1535,23 @@ function newTextLayer(p, txt = 'Your text here') {
 const textLayerAt = (p) => vecLayerAt(p, 'text');function confirmDlg(title, msg, okLabel, onOk) { const b = el('div', 'confirm-body'); b.textContent = msg; dlg(title, b, { okLabel, onOk }); }
 const textToolV = {
   // click text to edit it, drag it (or its handles) to move/resize/rotate it, click empty canvas to add text
+  // clicking off text first deselects it; only a click on empty canvas with nothing selected offers new text
   down(p, e) {
+    if (textEdit) {
+      const hit = vecLayerAt(p, 'text');
+      if (hit === textEdit.l) return; // clicks on the text being typed stay in the text box
+      endTextEdit();
+      if (!hit) { deselectLayers(); return; }
+      if (grabVec(p, e, hit)) op.textTap = { l: hit, start: p };
+      return;
+    }
     const onBox = onVecBox(p, 'text'), target = onBox ? activeLayer() : vecLayerAt(p, 'text');
     if (target) {
       const handle = onBox && arrHit(p) !== 'move';
-      if (textEdit && target === textEdit.l && !handle) return; // clicks inside the text being typed stay in the text box
-      if (textEdit) endTextEdit();
       if (grabVec(p, e, target) && !handle) op.textTap = { l: target, start: p };
       return;
     }
-    if (textEdit) { endTextEdit(); return; }
+    if (!doc().noSel && activeLayer()?.vec?.type === 'text') { deselectLayers(); return; }
     confirmDlg('Add text', 'Do you want to add a new Text layer?', 'Add', () => newTextLayer(p));
   },
   move(p, e) { if (op?.viaArr) arrangeTool.move(p, e); },
@@ -3066,6 +3099,10 @@ const MENUS = [
   { label: 'Filter', items: [{ label: 'No filters yet', off: () => true }] },
 ];
 
+// menu actions that only work on pixels are greyed out while text, a shape or a colour fill is selected
+const pixelsOnly = () => !doc().noSel && !!activeLayer()?.vec;
+const RASTER_ONLY = ['Clear layer (region)', 'Mirror right → left limb', 'Mirror left → right limb', 'Cut', 'Delete selected pixels'];
+for (const m of MENUS) for (const it of m.items) if (it !== '-' && it.run && (m.label === 'Adjustment' || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
 const menubar = $('#menubar');
 let openMenu = null;
 function closeMenus() { menubar.querySelectorAll('.mb-item').forEach(m => m.classList.remove('open')); openMenu = null; }
@@ -3081,6 +3118,7 @@ for (const m of MENUS) {
       const b = document.createElement('button'); b.className = 'mb-entry';
       b.innerHTML = `<span></span><kbd>${it.key || ''}</kbd>`; b.firstChild.textContent = it.label;
       b.disabled = !!it.off?.() || !it.run;
+      if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = 'Needs a plain image layer - use Layer → Rasterize layer first';
       b.onclick = () => { closeMenus(); it.run?.(); };
       dd.append(b);
     }
@@ -3293,7 +3331,12 @@ $('#btnPanels').onclick = (e) => { e.stopPropagation(); syncPanelMenu(); $('#pan
 $('#layoutDock').onclick = () => { applyLayout(FACTORY); saveLayout(); $('#panelsMenu').hidden = true; toast('Panels reset to the dock'); };
 $('#layoutSave').onclick = () => { store.set('stitch-layout-default', getLayout()); $('#panelsMenu').hidden = true; toast('Saved this layout as your default'); };
 $('#layoutReset').onclick = () => { applyLayout(store.get('stitch-layout-default') || FACTORY); saveLayout(); $('#panelsMenu').hidden = true; toast(store.get('stitch-layout-default') ? 'Reset to your default layout' : 'Reset to the original layout'); };
-$('#lyMenuBtn').onclick = (e) => { e.stopPropagation(); $('#lyMenu').hidden = !$('#lyMenu').hidden; };
+$('#lyMenuBtn').onclick = (e) => {
+  e.stopPropagation(); const m = $('#lyMenu'); m.hidden = !m.hidden;
+  const px = pixelsOnly(); // these change pixels, so they're greyed out on text/shape/fill layers
+  for (const id of ['lyAdjust', 'lyClear']) { $('#' + id).disabled = px; $('#' + id).title = px ? 'Needs a plain image layer - use Layer → Rasterize layer first' : ''; }
+  for (const id of ['lyMirrorRL', 'lyMirrorLR']) $('#' + id).disabled = px || !isTemplate();
+};
 $('#lyMenu').addEventListener('click', () => { $('#lyMenu').hidden = true; });
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#panelsMenu')) $('#panelsMenu').hidden = true;
@@ -3468,10 +3511,10 @@ function applySize(w, h) {
   gradMap = null;
   return true;
 }
-let homeFade = null; // the fade-out while leaving Home
+let homeFade = null, homeFirst = true; // the fade-out while leaving Home; Home starts visible (index.html) so boot never flashes the editor
 async function showHome() {
   const leaving = !!homeFade; if (homeFade) { homeFade.cancel(); homeFade = null; }
-  const opening = !homeOpen() || leaving;
+  const opening = !homeOpen() || leaving || homeFirst; homeFirst = false;
   if (opening) { leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
   await saveDirty(); // so the cards show the latest pictures
   await renderHome();
@@ -3480,7 +3523,7 @@ async function showHome() {
 function hideHome() {
   if (!homeOpen() || homeFade) return;
   $('#whatsNew')?.close();
-  const done = () => { homeEl.hidden = true; homeEl.style.pointerEvents = ''; homeFade = null; requestAnimationFrame(() => drawOverlay()); };
+  const done = () => { homeEl.hidden = true; homeEl.classList.remove('no-anim'); homeEl.style.pointerEvents = ''; homeFade = null; requestAnimationFrame(() => drawOverlay()); };
   if (!motionOK()) { done(); return; }
   homeEl.style.pointerEvents = 'none';
   const a = homeFade = homeEl.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: 'ease-in' });

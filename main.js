@@ -7,10 +7,11 @@ const zlib = require('zlib');
 function createWindow() {
   const win = new BrowserWindow({
     width: 1480, height: 920, minWidth: 1100, minHeight: 700,
-    backgroundColor: '#15171c', title: 'Stitch Editor', autoHideMenuBar: true, icon: path.join(__dirname, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+    backgroundColor: '#181818', show: false, title: 'Stitch Editor', autoHideMenuBar: true, icon: path.join(__dirname, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
+  win.once('ready-to-show', () => win.show()); // no blank window before the first frame is painted
   win.webContents.on('before-input-event', (e, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools();
     // F11 fullscreen - Electron's default menu normally provides it, but the app has no menu
