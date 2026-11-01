@@ -3338,15 +3338,23 @@ function deleteProject(m) {
     renderHome();
   });
 }
-// a dropped/opened image becomes its own project: a template if it's exactly 585 x 559, otherwise a canvas the image's size
+const TEMPLATE_ICON = '<svg viewBox="0 0 48 48"><path d="M17 8l-9 5 3 8 4-2v19h18V19l4 2 3-8-9-5c-1 3-4 5-7 5s-6-2-7-5z"/></svg>';
+const CANVAS_ICON = '<svg viewBox="0 0 48 48"><rect x="7" y="11" width="34" height="26" rx="2"/><path d="M7 31l9-8 7 6 5-4 13 10"/><circle cx="31" cy="19" r="3"/></svg>';
+// a dropped/opened image becomes its own project; the user picks Template or Normal (a canvas the image's size)
 async function newProjectFromImages(files) {
   const img = new Image(); img.src = URL.createObjectURL(files[0]);
   try { await img.decode(); } catch { toast('Could not read ' + files[0].name); return; } finally { URL.revokeObjectURL(img.src); }
-  const name = files[0].name.replace(/\.[^.]+$/, '') || 'Untitled', tpl = img.naturalWidth === TW && img.naturalHeight === TH;
-  const st = tpl ? makeSet(name) : makeSet(name, 'canvas', clampSide(img.naturalWidth, 1920), clampSide(img.naturalHeight, 1080));
-  if (tpl && /pant|leg|trouser|jean|short/i.test(name)) st.mode = 'pants';
-  addSet(st);
-  for (const f of files) await importImage(f, true);
+  const name = files[0].name.replace(/\.[^.]+$/, '') || 'Untitled', w = clampSide(img.naturalWidth, 1920), h = clampSide(img.naturalHeight, 1080);
+  const create = async (st) => { hd.close(); addSet(st); for (const f of files) await importImage(f, true); };
+  const body = el('div', 'openimg newproj-ask'), p = el('p'), row = el('div', 'openimg-row');
+  p.textContent = files.length > 1 ? `Make a new project from these ${files.length} images as a…` : `Make a new project from “${name}” as a…`;
+  const big = (svg, label, sub, fn) => { const b = el('button', 'openimg-btn np-type', svg); const t = el('span'), s = el('small'); t.textContent = label; s.textContent = sub; b.append(t, s); b.onclick = fn; return b; };
+  row.append(
+    big(TEMPLATE_ICON, 'Template', 'Roblox shirt + pants, 585 × 559', () => { const st = makeSet(name); if (/pant|leg|trouser|jean|short/i.test(name)) st.mode = 'pants'; create(st); }),
+    big(CANVAS_ICON, 'Normal', `A plain canvas, ${w} × ${h}`, () => create(makeSet(name, 'canvas', w, h))),
+  );
+  body.append(p, row);
+  const hd = dlg('New project', body, { noFoot: true });
 }
 const SIZE_PRESETS = [[1920, 1080, 'Full HD'], [1280, 720, 'HD'], [3840, 2160, '4K'], [1080, 1080, 'Square'], [1080, 1920, 'Portrait'], [512, 512, 'Icon']];
 function openNewProjectDialog() {
@@ -3357,8 +3365,8 @@ function openNewProjectDialog() {
   const types = el('div', 'openimg-row np-types');
   const typeBtn = (k, svg, label, sub) => { const b = el('button', 'openimg-btn np-type', svg); b.type = 'button'; b.dataset.kind = k; const t = el('span'), s = el('small'); t.textContent = label; s.textContent = sub; b.append(t, s); b.onclick = () => { kind = k; sync(); }; return b; };
   types.append(
-    typeBtn('template', '<svg viewBox="0 0 48 48"><path d="M17 8l-9 5 3 8 4-2v19h18V19l4 2 3-8-9-5c-1 3-4 5-7 5s-6-2-7-5z"/></svg>', 'Template', 'Roblox shirt + pants, 585 × 559'),
-    typeBtn('canvas', '<svg viewBox="0 0 48 48"><rect x="7" y="11" width="34" height="26" rx="2"/><path d="M7 31l9-8 7 6 5-4 13 10"/><circle cx="31" cy="19" r="3"/></svg>', 'Normal', 'A plain canvas, any size'),
+    typeBtn('template', TEMPLATE_ICON, 'Template', 'Roblox shirt + pants, 585 × 559'),
+    typeBtn('canvas', CANVAS_ICON, 'Normal', 'A plain canvas, any size'),
   );
   const sizeBox = el('div', 'np-size'), dims = el('div', 'np-dims');
   const num = (v) => { const i = el('input'); i.type = 'number'; i.min = 1; i.max = MAX_SIDE; i.value = v; i.oninput = sync; return i; };
