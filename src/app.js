@@ -1,22 +1,29 @@
-import { W, H, PARTS, FACE_ORDER, regionsFor, regionAt, boundsOf } from './template.js';
+import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf } from './template.js';
+import { CHANGELOG } from './changelog.js';
 import { createPreview } from './preview.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const native = window.native || null;
 
+// W x H is the size of the project on screen: 585 x 559 for templates, anything for a normal canvas (see applySize)
+let W = TW, H = TH;
+const isTemplate = () => state.mode !== 'canvas';
+const regionsFor = (mode) => mode === 'canvas' ? [{ id: 'all', label: 'Whole canvas', group: null, rects: [[0, 0, W, H]] }] : templateRegions(mode);
+const regionAt = (x, y, mode) => mode === 'canvas' ? null : templateRegionAt(x, y, mode);
+
 // ------------------------------------------------------------------ documents & layers
 function mkCanvas(w = W, h = H) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 const ctxOf = (c) => c.getContext('2d', { willReadFrequently: true });
 
 let idCounter = 0;
-function makeLayer(name) {
-  const canvas = mkCanvas();
+function makeLayer(name, w = W, h = H) {
+  const canvas = mkCanvas(w, h);
   return { id: 'l' + (++idCounter), name, kind: 'Layer', locked: false, canvas, ctx: ctxOf(canvas), visible: true, opacity: 1, blend: 'source-over' };
 }
-function newDoc(kind) {
-  const l = makeLayer('Layer 1');
-  return { kind, layers: [l], activeId: l.id, undo: [], redo: [], comp: mkCanvas(), counter: 1 };
+function newDoc(kind, w = W, h = H) {
+  const l = makeLayer('Layer 1', w, h);
+  return { kind, layers: [l], activeId: l.id, undo: [], redo: [], comp: mkCanvas(w, h), counter: 1 };
 }
 
 const state = {
@@ -51,7 +58,7 @@ function compositeLayers(c, layers, groups) {
     if (g) {
       let j = i; while (j < layers.length && layers[j].group === gid) j++;
       if (g.visible !== false && (g.opacity ?? 1) > 0) {
-        const tc = mkCanvas(), tx = tc.getContext('2d');
+        const tc = mkCanvas(c.canvas.width, c.canvas.height), tx = tc.getContext('2d');
         for (let k = i; k < j; k++) { const m = layers[k]; if (!m.visible || m.opacity <= 0) continue; tx.globalAlpha = m.opacity; tx.globalCompositeOperation = m.blend; tx.drawImage(m.canvas, 0, 0); }
         c.globalAlpha = g.opacity ?? 1; c.globalCompositeOperation = 'source-over'; c.drawImage(tc, 0, 0);
       }
@@ -63,7 +70,7 @@ function compositeLayers(c, layers, groups) {
   c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
 }
 function compositeDoc(d) {
-  const c = d.comp.getContext('2d'); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, W, H);
+  const c = d.comp.getContext('2d'); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, d.comp.width, d.comp.height);
   compositeLayers(c, d.layers, d.groups);
 }
 
@@ -71,12 +78,13 @@ let renderQueued = false;
 function requestRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); } }
 function render() {
   renderQueued = false;
-  compositeDoc(state.docs.shirt); compositeDoc(state.docs.pants);
+  const tpl = isTemplate();
+  if (tpl) { compositeDoc(state.docs.shirt); compositeDoc(state.docs.pants); } else compositeDoc(doc());
   vctx.clearRect(0, 0, W, H);
   vctx.drawImage(doc().comp, 0, 0);
-  if (state.underlay && templateReady()) vctx.drawImage(templateImg, 0, 0, W, H); // same as export
+  if (tpl && state.underlay && templateReady()) vctx.drawImage(templateImg, 0, 0, W, H); // same as export
   drawOverlay();
-  if (preview) preview.update(state.docs.shirt.comp, state.docs.pants.comp);
+  if (tpl && preview) preview.update(state.docs.shirt.comp, state.docs.pants.comp);
   updateThumbs();
 }
 
@@ -90,12 +98,12 @@ function drawOverlay() {
   const vr = view.getBoundingClientRect(); OS = vr.width / W * dpr;
   o.setTransform(OS, 0, 0, OS, Math.round((vr.left - orc.left) * dpr) + .5, Math.round((vr.top - orc.top) * dpr) + .5);
   const regs = regionsFor(state.mode), faces = regs.filter(r => r.face);
-  if (state.shade) {
+  if (state.shade && faces.length) {
     o.fillStyle = 'rgba(12,14,20,.6)'; o.beginPath(); o.rect(0, 0, W, H);
     for (const f of faces) o.rect(...f.rects[0]);
     o.fill('evenodd');
   }
-  if (state.guides) {
+  if (state.guides && faces.length) {
     o.lineWidth = 1 / OS; o.setLineDash([dpx(4), dpx(3)]); o.strokeStyle = 'rgba(0,170,225,.85)';
     for (const f of faces) { const [x, y, w, h] = f.rects[0]; o.strokeRect(x, y, w, h); } // exactly on the template's face borders
     o.setLineDash([]);
@@ -148,13 +156,14 @@ scroller.addEventListener('wheel', e => {
 }, { passive: false });
 
 // ------------------------------------------------------------------ history
-const MAX_HISTORY = 60;
+// every undo step keeps full-size snapshots, so big canvases keep fewer steps (60 for templates, about 24 at 1920 x 1080)
+const maxHistory = () => Math.max(10, Math.min(60, Math.floor(400e6 / (W * H * 8))));
 const TOOL_LABELS = { pen: 'Path', shape: 'Shape', select: 'Select', lasso: 'Lasso', wand: 'Magic select', brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser', fill: 'Fill', gradient: 'Gradient', rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', text: 'Text', move: 'Move' };
 let histLabel = null;
 function labelled(label, fn) { const prev = histLabel; histLabel = label; try { return fn(); } finally { histLabel = prev; } }
 function pushHistory(entry) {
   const d = doc(); editVersion++; entry.label = entry.label || histLabel || TOOL_LABELS[state.tool] || 'Edit'; d.undo.push(entry);
-  if (d.undo.length > MAX_HISTORY) d.undo.shift();
+  if (d.undo.length > maxHistory()) d.undo.shift();
   d.redo.length = 0; changed();
 }
 function pushPixels(layer, before, vb) { const e = { t: 'px', id: layer.id, before, after: layer.ctx.getImageData(0, 0, W, H) }; if (vb !== undefined || layer.vec) { e.vb = clone(vb); e.va = clone(layer.vec); } pushHistory(e); }
@@ -415,6 +424,7 @@ function copySel(cut) {
 function pasteCanvas(c, name = 'Pasted') { structOp(() => { const l = addLayer(name); l.kind = 'Image'; l.ctx.drawImage(c, 0, 0); }, 'Paste'); setTool('move'); }
 document.addEventListener('paste', async (e) => {
   if (e.target.matches?.('input, textarea')) return;
+  if (homeOpen()) { const f = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'))?.getAsFile(); if (f) { e.preventDefault(); newProjectFromImages([f]); } return; }
   const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
   if (item) { e.preventDefault(); const img = new Image(); img.src = URL.createObjectURL(item.getAsFile()); await img.decode(); const c = mkCanvas(); c.getContext('2d').drawImage(img, img.width === W && img.height === H ? 0 : Math.round((W - Math.min(W, img.width)) / 2), img.width === W && img.height === H ? 0 : Math.round((H - Math.min(H, img.height)) / 2), Math.min(W, img.width), Math.min(H, img.height)); pasteCanvas(c, 'Pasted image'); return; }
   if (clip) { e.preventDefault(); pasteCanvas(clip); }
@@ -1565,14 +1575,14 @@ function pxzPaint(f) {
   }
   return { type: 'color', color: '#000000' };
 }
-async function readPxz(buf, fileName) {
+async function readPxz(buf, fileName, tw = W, th = H) {
   const files = await unzip(buf); const man = JSON.parse(new TextDecoder().decode(files.get('manifest.json')));
   const layers = [], skipped = [];
-  const sx = man.width && man.width !== W ? W / man.width : 1, sy = man.height && man.height !== H ? H / man.height : 1;
+  const sx = man.width && man.width !== tw ? tw / man.width : 1, sy = man.height && man.height !== th ? th / man.height : 1;
   for (const it of man.stack || []) {
-    const l = makeLayer(it.name || 'Layer'); l.opacity = it.opacity ?? 1; l.visible = it.visible !== false; l.locked = !!it.locked;
+    const l = makeLayer(it.name || 'Layer', tw, th); l.opacity = it.opacity ?? 1; l.visible = it.visible !== false; l.locked = !!it.locked;
     const bm = it.blendmode || it.blend; if (bm && BLENDS.includes(bm)) l.blend = bm;
-    const r = it.rect || { x: 0, y: 0, w: W, h: H, r: 0 }, rx = r.x * sx, ry = r.y * sy, rw = r.w * sx, rh = r.h * sy, ang = ((r.r || 0) % 360) * Math.PI / 180;
+    const r = it.rect || { x: 0, y: 0, w: tw, h: th, r: 0 }, rx = r.x * sx, ry = r.y * sy, rw = r.w * sx, rh = r.h * sy, ang = ((r.r || 0) % 360) * Math.PI / 180;
     if (it.type === 'image' && files.has(it.content)) {
       const img = new Image(); img.src = URL.createObjectURL(new Blob([files.get(it.content)], { type: 'image/png' })); await img.decode();
       const c = l.ctx; c.save(); c.translate(rx + rw / 2, ry + rh / 2); c.rotate(ang); c.drawImage(img, -rw / 2, -rh / 2, rw, rh); c.restore(); URL.revokeObjectURL(img.src);
@@ -1604,16 +1614,17 @@ function askPxz(file) {
   const p = el('p'); p.textContent = `“${name}” is a…`;
   const seg = obSeg([{ v: 'shirt', text: 'Shirt' }, { v: 'pants', text: 'Pants' }], () => kind, v => { kind = v; addB.querySelector('span').textContent = `Replace ${kind} in this set`; }); seg.classList.add('pxz-kind');
   const row = el('div', 'openimg-row');
-  const big = (svg, label, fn) => { const b = el('button', 'openimg-btn', svg); const sp = el('span'); sp.textContent = label; b.append(sp); b.onclick = async () => { h.close(); try { endTextEdit(); const r = await readPxz(await file.arrayBuffer(), name); fn(r); if (r.skipped.length) toast('Skipped: ' + r.skipped.join(', ')); } catch (err) { toast('Could not open: ' + err.message); } }; return b; };
-  const newB = big('<svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="1"/><path d="M24 17v14M17 24h14"/></svg>', 'Create new set', (r) => {
-    const st = makeSet(r.name); st.mode = kind; const d = st.docs[kind]; d.layers = r.layers; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; normalizeGroups(d); addSet(st); toast(`Opened ${r.name} as the ${kind} of a new set`);
-  });
+  const big = (svg, label, fn, size = [W, H]) => { const b = el('button', 'openimg-btn', svg); const sp = el('span'); sp.textContent = label; b.append(sp); b.onclick = async () => { h.close(); try { endTextEdit(); const r = await readPxz(await file.arrayBuffer(), name, ...size); fn(r); if (r.skipped.length) toast('Skipped: ' + r.skipped.join(', ')); } catch (err) { toast('Could not open: ' + err.message); } }; return b; };
+  const newB = big('<svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="1"/><path d="M24 17v14M17 24h14"/></svg>', 'Create new project', (r) => {
+    const st = makeSet(r.name); st.mode = kind; const d = st.docs[kind]; d.layers = r.layers; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; normalizeGroups(d); addSet(st); toast(`Opened ${r.name} as the ${kind} of a new project`);
+  }, [TW, TH]);
   const addB = big('<svg viewBox="0 0 48 48"><rect x="6" y="16" width="26" height="22" rx="1"/><path d="M12 16v-6h30v22h-10"/><path d="M15 27h8M19 23l4 4-4 4"/></svg>', `Replace ${kind} in this set`, (r) => {
     if (state.mode !== kind) setMode(kind);
     structOp(() => { const d = doc(); d.layers = r.layers; d.groups = []; d.activeGroup = null; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; }, `Open ${r.name}`);
     toast(`Opened ${r.name} as the ${kind} (Ctrl+Z to undo)`);
   });
-  row.append(newB, addB); body.append(p, seg, row);
+  row.append(newB); if (!homeOpen() && isTemplate()) row.append(addB); // replacing only makes sense inside an open template
+  body.append(p, seg, row);
   const h = dlg('Open Pixlr file', body, { noFoot: true });
 }
 async function blobToB64(blob) { const u8 = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); }
@@ -1630,12 +1641,13 @@ async function exportPxz() {
     stack.push(item);
   }
   compositeDoc(d); const th = mkCanvas(292, 280); th.getContext('2d').drawImage(d.comp, 0, 0, 292, 280);
-  const name = `${state.mode === 'pants' ? 'Pants' : 'Shirt'} template`;
+  const name = isTemplate() ? `${state.mode === 'pants' ? 'Pants' : 'Shirt'} template` : state.sets[state.setIdx].name;
+  const pxzName = isTemplate() ? `${state.mode}-template.pxz` : fileSafe(name) + '.pxz';
   const man = { id: crypto.randomUUID(), name, type: 'document', unit: 'pixel', width: W, height: H, stack };
   const all = [{ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(man)) }, { name: 'thumbnail.webp', data: new Uint8Array(await (await canvasBlob(th, 'image/webp', .8)).arrayBuffer()) }, ...entries];
   const blob = zipStore(all), b64 = await blobToB64(blob);
-  if (native) { const p = await native.saveFile({ defaultPath: `${state.mode}-template.pxz`, filters: [{ name: 'Pixlr document', extensions: ['pxz'] }], data: b64, encoding: 'base64' }); if (p) toast('Saved ' + p); }
-  else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${state.mode}-template.pxz`; a.click(); }
+  if (native) { const p = await native.saveFile({ defaultPath: pxzName, filters: [{ name: 'Pixlr document', extensions: ['pxz'] }], data: b64, encoding: 'base64' }); if (p) toast('Saved ' + p); }
+  else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = pxzName; a.click(); }
 }
 
 // ------------------------------------------------------------------ colour fill layers + matching colours
@@ -1644,7 +1656,8 @@ state.swatches = [
   { id: 'sw2', name: 'Accent', paint: { type: 'color', color: '#d5cfff' } },
   { id: 'sw3', name: 'Trim', paint: { type: 'color', color: '#111111' } },
 ];
-state.sets = [{ id: 'set0', name: 'Untitled', mode: 'shirt', docs: state.docs, swatches: state.swatches }]; state.setIdx = 0;
+// placeholder until a project is opened from Home; never saved
+state.sets = [{ id: 'set0', temp: true, name: 'Untitled', kind: 'template', w: TW, h: TH, mode: 'shirt', docs: state.docs, swatches: state.swatches }]; state.setIdx = 0;
 const swatchById = (id) => state.swatches.find(s => s.id === id);
 const maskCache = new Map();
 function maskCanvas(url) {
@@ -2194,7 +2207,8 @@ $('#adjCancel').onclick = () => { $('#adjModal').hidden = true; if (adjOp) { res
 
 // ------------------------------------------------------------------ mode tabs & preview controls
 function setMode(m) {
-  cancelOp(); state.mode = m;
+  cancelOp(); state.mode = m; document.body.classList.toggle('canvas-mode', m === 'canvas');
+  $('#btnExport').title = m === 'canvas' ? 'Export the canvas as a PNG (Ctrl+E)' : 'Export the current template as a 585×559 PNG (Ctrl+E)';
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
   if (!regionsFor(m).some(r => r.id === state.region)) state.region = 'all';
   buildRegionSelect(); rebuildLayers(); changed();
@@ -2222,10 +2236,12 @@ async function saveText(text, name, label, ext) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click();
 }
 
+const fileSafe = (s) => String(s || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'Untitled';
 function exportPng() {
   compositeDoc(doc());
   const out = mkCanvas(), c = out.getContext('2d');
   c.drawImage(doc().comp, 0, 0);
+  if (!isTemplate()) { saveDataUrl(out.toDataURL('image/png'), fileSafe(state.sets[state.setIdx].name) + '.png', 'PNG image', ['png']); return; }
   if (templateReady()) c.drawImage(templateImg, 0, 0, W, H); // always stamp the Roblox template on top
   saveDataUrl(out.toDataURL('image/png'), `${state.mode}-template.png`, 'PNG image', ['png']);
 }
@@ -2238,6 +2254,7 @@ function docPng(d) {
 }
 // exports the shirt and the pants of the current set as "<set name>-Shirt.png" / "<set name>-Pants.png"
 async function exportSet() {
+  if (!isTemplate()) return exportPng();
   const set = stashSet(), base = (set.name || 'Untitled').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'Untitled';
   const files = [{ name: `${base}-Shirt.png`, data: docPng(set.docs.shirt).split(',')[1] }, { name: `${base}-Pants.png`, data: docPng(set.docs.pants).split(',')[1] }];
   if (native?.saveFiles) { const r = await native.saveFiles({ title: `Export “${set.name}” - choose a folder`, files }); if (r) toast(`Saved ${files.map(f => f.name).join(' and ')} to ${r}`); return; }
@@ -2245,47 +2262,58 @@ async function exportSet() {
 }
 
 function serializeSet(set) {
-  const out = { app: 'stitch-studio', version: 1, name: set.name, mode: set.mode, docs: {}, swatches: set.swatches };
-  for (const k of ['shirt', 'pants']) {
+  // "kind" tells a template (shirt + pants, 585 x 559) from a normal canvas; files without it are templates
+  const out = { app: 'stitch-studio', version: 1, kind: set.kind || 'template', width: set.w || TW, height: set.h || TH, name: set.name, mode: set.mode, docs: {}, swatches: set.swatches };
+  for (const k of Object.keys(set.docs)) {
     const d = set.docs[k];
     out.docs[k] = { active: d.layers.findIndex(l => l.id === d.activeId), counter: d.counter, groups: d.groups || [], layers: d.layers.map(l => ({ name: l.name, kind: l.kind, vec: l.vec || null, group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, png: l.canvas.toDataURL('image/png') })) };
   }
   return out;
 }
-function stashSet() { const s = state.sets[state.setIdx]; s.docs = state.docs; s.swatches = state.swatches; s.mode = state.mode; return s; }
+function stashSet() { const s = state.sets[state.setIdx]; if (!s) return null; s.docs = state.docs; s.swatches = state.swatches; s.mode = state.mode; return s; }
 function serialize() { return JSON.stringify(serializeSet(stashSet())); }
-function serializeAll() { stashSet(); return JSON.stringify({ app: 'stitch-studio', version: 2, active: state.setIdx, sets: state.sets.map(serializeSet) }); }
 const defaultSwatches = () => [{ id: 'sw1', name: 'Main', paint: { type: 'color', color: '#372a57' } }, { id: 'sw2', name: 'Accent', paint: { type: 'color', color: '#d5cfff' } }, { id: 'sw3', name: 'Trim', paint: { type: 'color', color: '#111111' } }];
-let setCounter = 0;
-function makeSet(name) { return { id: 'set' + (++setCounter) + '_' + Date.now().toString(36), name: name || 'Untitled', mode: 'shirt', docs: { shirt: newDoc('shirt'), pants: newDoc('pants') }, swatches: defaultSwatches() }; }
+const newProjectId = () => 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const MAX_SIDE = 8000;
+const clampSide = (v, d) => Math.max(1, Math.min(MAX_SIDE, Math.round(+v) || d));
+// a set is one project (one tab). kind 'template' = Roblox shirt + pants, always 585 x 559; 'canvas' = one plain image of any size
+function makeSet(name, kind = 'template', w = TW, h = TH) {
+  const canvas = kind === 'canvas'; if (!canvas) { w = TW; h = TH; }
+  const docs = canvas ? { canvas: newDoc('canvas', w, h) } : { shirt: newDoc('shirt', w, h), pants: newDoc('pants', w, h) };
+  return { id: newProjectId(), name: name || 'Untitled', kind: canvas ? 'canvas' : 'template', w, h, mode: canvas ? 'canvas' : 'shirt', docs, swatches: defaultSwatches() };
+}
+const placeholderSet = () => ({ ...makeSet('Untitled'), temp: true }); // shown behind Home when no project is open; never saved
 // builds a set (tab) from saved .stitch data
-async function buildSet(data, name) {
+async function buildSet(data, name, id) {
   if (data.app !== 'stitch-studio') throw new Error('Not a Stitch Editor project');
-  const set = makeSet(data.name || name); if (Array.isArray(data.swatches)) set.swatches = data.swatches; if (data.mode) set.mode = data.mode;
+  const canvas = data.kind === 'canvas';
+  const set = canvas ? makeSet(data.name || name, 'canvas', clampSide(data.width, 1920), clampSide(data.height, 1080)) : makeSet(data.name || name);
+  if (id) set.id = id; if (data.updated) set.updated = data.updated;
+  if (Array.isArray(data.swatches)) set.swatches = data.swatches; if (data.mode && !canvas) set.mode = data.mode;
   const prevSw = state.swatches; state.swatches = set.swatches; // fill layers look up their colours while loading
-  try { await fillDocs(set.docs, data); } finally { state.swatches = prevSw; }
+  try { await fillDocs(set, data); } finally { state.swatches = prevSw; }
   return set;
 }
 async function deserialize(text) { const set = await buildSet(JSON.parse(text)); state.docs = set.docs; state.swatches = set.swatches; }
-async function fillDocs(docs, data) {
-  for (const k of ['shirt', 'pants']) {
-    const src = data.docs[k]; if (!src) continue;
-    const d = newDoc(k); d.layers = []; d.counter = src.counter || src.layers.length;
+async function fillDocs(set, data) {
+  for (const k of Object.keys(set.docs)) {
+    const src = data.docs?.[k]; if (!src) continue;
+    const d = newDoc(k, set.w, set.h); d.layers = []; d.counter = src.counter || src.layers.length;
     for (const o of src.layers) {
-      const l = makeLayer(o.name); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend });
+      const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend });
       const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0); if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') renderFill(l); if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
     }
-    if (!d.layers.length) d.layers.push(makeLayer('Layer 1'));
+    if (!d.layers.length) d.layers.push(makeLayer('Layer 1', set.w, set.h));
     d.groups = src.groups || []; normalizeGroups(d);
     d.activeId = (d.layers[src.active] || d.layers[d.layers.length - 1]).id;
-    docs[k] = d;
+    set.docs[k] = d;
   }
 }
 $('#btnSave').onclick = () => saveText(serialize(), (state.sets[state.setIdx].name || 'my-outfit').replace(/[\\/:*?"<>|]+/g, '') + '.stitch', 'Stitch Editor project', ['stitch']);
 $('#btnOpen').onclick = () => $('#fileProject').click();
 $('#fileProject').onchange = async (e) => { const fl = [...e.target.files]; e.target.value = ''; if (fl.length) await openFiles(fl); };
 $('#btnNew').onclick = () => {
-  if (!confirm(`Clear the ${state.mode} template and start fresh? (You can undo this.)`)) return;
+  if (!confirm(`Clear ${isTemplate() ? `the ${state.mode} template` : 'the canvas'} and start fresh? (You can undo this.)`)) return;
   structOp(() => { const d = doc(); d.layers = [makeLayer('Layer 1')]; d.activeId = d.layers[0].id; d.counter = 1; }, 'New');
 };
 
@@ -2310,33 +2338,84 @@ $('#fileImage').onchange = async (e) => { for (const f of e.target.files) await 
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', async e => { e.preventDefault(); if (e.dataTransfer.files.length) await openFiles([...e.dataTransfer.files]); });
 
-// autosave
-let autosaveTimer;
-function scheduleAutosave() {
+// ------------------------------------------------------------------ project library + autosave
+// every tab is a project saved on its own (main.js "Project library"); autosave.stitch only remembers which ones are open
+const lib = native?.projectsList ? {
+  list: () => native.projectsList(), read: (id) => native.projectRead(id),
+  write: (id, data, meta) => native.projectWrite(id, data, meta), remove: (id) => native.projectDelete(id),
+} : { // plain browser: projects live in localStorage
+  async list() { const out = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k.startsWith('stitch-meta:')) try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } } return out.sort((a, b) => (b.updated || 0) - (a.updated || 0)); },
+  async read(id) { return localStorage.getItem('stitch-proj:' + id); },
+  async write(id, data, meta) { localStorage.setItem('stitch-proj:' + id, data); localStorage.setItem('stitch-meta:' + id, JSON.stringify(meta)); },
+  async remove(id) { localStorage.removeItem('stitch-proj:' + id); localStorage.removeItem('stitch-meta:' + id); },
+};
+// the picture on a Home card: shirt and pants side by side for templates, the whole image for a normal canvas
+function projectThumb(set) {
+  if (set.kind === 'canvas') {
+    const d = set.docs.canvas; compositeDoc(d);
+    const s = Math.min(1, 360 / set.w, 225 / set.h), c = mkCanvas(Math.max(1, Math.round(set.w * s)), Math.max(1, Math.round(set.h * s))), x = c.getContext('2d');
+    x.imageSmoothingQuality = 'high'; x.drawImage(d.comp, 0, 0, c.width, c.height);
+    return c.toDataURL('image/webp', .85);
+  }
+  const pw = 176, ph = Math.round(pw * TH / TW), gap = 8, c = mkCanvas(pw * 2 + gap, ph), x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  ['shirt', 'pants'].forEach((k, i) => { const d = set.docs[k]; compositeDoc(d); x.drawImage(d.comp, i * (pw + gap), 0, pw, ph); if (templateReady()) x.drawImage(templateImg, i * (pw + gap), 0, pw, ph); });
+  return c.toDataURL('image/webp', .85);
+}
+async function saveProject(st) {
+  st.updated = Date.now();
+  const data = serializeSet(st); data.updated = st.updated;
+  await lib.write(st.id, JSON.stringify(data), { id: st.id, name: st.name, kind: st.kind, width: st.w, height: st.h, updated: st.updated, thumb: projectThumb(st) });
+}
+let autosaveTimer, sessionReady = false, saving = Promise.resolve();
+// marks a project as changed; it's saved (with the list of open tabs) shortly after
+function scheduleAutosave(st = state.sets[state.setIdx]) { if (st && !st.temp) st.dirty = true; saveSessionSoon(); }
+function saveSessionSoon() { clearTimeout(autosaveTimer); autosaveTimer = setTimeout(saveDirty, 1500); }
+function saveDirty() {
   clearTimeout(autosaveTimer);
-  autosaveTimer = setTimeout(() => {
-    const data = serializeAll();
-    if (native) native.autosaveWrite(data).catch(() => {});
-    else { try { localStorage.setItem('stitch-autosave', data); } catch { /* storage full or unavailable */ } }
-  }, 1500);
+  const run = async () => {
+    stashSet();
+    for (const st of state.sets) if (st.dirty && !st.temp) { st.dirty = false; try { await saveProject(st); } catch (err) { st.dirty = true; console.error('save failed', err); } }
+    await saveSession();
+  };
+  return (saving = saving.then(run, run)); // one save at a time
 }
-async function loadAutosave() {
-  let data = null;
-  if (native) data = await native.autosaveRead().catch(() => null);
-  else { try { data = localStorage.getItem('stitch-autosave'); } catch { data = null; } }
-  if (!data) return false;
-  try {
-    const j = JSON.parse(data);
-    if (j.version === 2 && Array.isArray(j.sets)) { const sets = []; for (const sd of j.sets) sets.push(await buildSet(sd)); if (!sets.length) return false; state.sets = sets; state.setIdx = Math.min(j.active || 0, sets.length - 1); }
-    else state.sets = [await buildSet(j, 'Untitled')], state.setIdx = 0;
-    const cur = state.sets[state.setIdx]; state.docs = cur.docs; state.swatches = cur.swatches; state.mode = cur.mode || 'shirt';
-    return true;
-  } catch { return false; }
+async function saveSession() {
+  if (!sessionReady) return;
+  const cur = state.sets[state.setIdx];
+  const data = JSON.stringify({ app: 'stitch-studio', session: 1, open: state.sets.filter(s => !s.temp).map(s => s.id), active: cur && !cur.temp ? cur.id : null });
+  try { if (native) await native.autosaveWrite(data); else localStorage.setItem('stitch-autosave', data); } catch { /* storage full or unavailable */ }
 }
-
+// reopens last time's tabs. A 0.3.x autosave (every tab in one file) is moved into the library as separate projects.
+async function loadSession() {
+  let raw = null, j = null;
+  try { raw = native ? await native.autosaveRead() : localStorage.getItem('stitch-autosave'); } catch { raw = null; }
+  try { j = raw ? JSON.parse(raw) : null; } catch { j = null; }
+  if (!j || j.app !== 'stitch-studio') return { hadData: false };
+  const sets = []; let active = null;
+  if (j.session) {
+    for (const id of j.open || []) { try { const txt = await lib.read(id); if (txt) sets.push(await buildSet(JSON.parse(txt), 'Untitled', id)); } catch (err) { console.error('could not reopen', id, err); } }
+    active = j.active;
+  } else {
+    const used = (st) => Object.values(st.docs).some(d => d.layers.length > 1 || d.layers.some(l => l.vec || contentBounds(l)));
+    for (const sd of j.version === 2 && Array.isArray(j.sets) ? j.sets : [j]) {
+      try { const st = await buildSet(sd, 'Untitled'); if (used(st)) { await saveProject(st); sets.push(st); } } catch (err) { console.error('could not move project', err); }
+    }
+    active = sets[Math.min(j.active || 0, sets.length - 1)]?.id;
+  }
+  if (sets.length) { state.sets = sets; state.setIdx = Math.max(0, sets.findIndex(s => s.id === active)); }
+  return { hadData: true };
+}
 // ------------------------------------------------------------------ keyboard
 const keyTools = { k: 'pen', m: 'select', w: 'wand', h: 'hand', b: 'brush', p: 'pencil', e: 'eraser', g: 'fill', d: 'gradient', i: 'eyedropper', u: 'shape', l: 'lasso', t: 'text', v: 'move' };
 document.addEventListener('keydown', e => {
+  if (homeOpen()) {
+    if (document.querySelector('.modal')) return;
+    const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+    if (mod && k === 'n') { e.preventDefault(); openNewProjectDialog(); }
+    else if (mod && k === 'o') { e.preventDefault(); $('#btnOpen').click(); }
+    else if (k === 'escape' && !$('#homeBack').hidden) hideHome();
+    return;
+  }
   if (e.target.matches('input, textarea, select') && !(e.ctrlKey || e.metaKey)) return;
   if (!$('#textModal').hidden || !$('#adjModal').hidden || document.querySelector('.modal.dlg-open, .modal:not([id])')) return;
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
@@ -2349,7 +2428,7 @@ document.addEventListener('keydown', e => {
     else if (k === 'i' && !e.shiftKey) { e.preventDefault(); $('#btnImport').click(); }
     else if (k === 'j') { e.preventDefault(); $('#lyDup').click(); }
     else if (k === 'd') { e.preventDefault(); $('#lyDup').click(); }
-    else if (k === 'n' && !e.shiftKey) { e.preventDefault(); newSet(); }
+    else if (k === 'n' && !e.shiftKey) { e.preventDefault(); openNewProjectDialog(); }
     else if (k === 'w') { e.preventDefault(); closeSet(state.setIdx); }
     else if (k === 'tab') { e.preventDefault(); switchSet((state.setIdx + (e.shiftKey ? state.sets.length - 1 : 1)) % state.sets.length); }
     else if (k === 'g' && e.shiftKey) { e.preventDefault(); ungroupLayers(); }
@@ -2385,7 +2464,7 @@ document.addEventListener('keydown', e => {
   else if (k === '1') setZoom(1);
   else if (k === 'escape' && penDraw) finishPath();
   else if (k === 'escape') { if (lasso) { lasso = null; selPreview = null; drawOverlay(); } else if (op) cancelOp(); else if (hasSel) deselect(); }
-  else if (k === 'tab') { e.preventDefault(); setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); }
+  else if (k === 'tab') { e.preventDefault(); if (isTemplate()) setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); }
   else if (state.tool === 'move' && k.startsWith('arrow')) {
     e.preventDefault(); const s = e.shiftKey ? 10 : 1;
     nudge(k === 'arrowleft' ? -s : k === 'arrowright' ? s : 0, k === 'arrowup' ? -s : k === 'arrowdown' ? s : 0);
@@ -2689,7 +2768,9 @@ function anchorGrid(initial = 4) {
 function sizeDialog(kind) {
   const body = document.createElement('div'); body.className = 'adj-body size-body';
   const note = document.createElement('p'); note.className = 'adj-note';
-  note.textContent = kind === 'image'
+  note.textContent = !isTemplate()
+    ? (kind === 'image' ? 'Scales the artwork on every layer. The canvas itself keeps its size.' : 'Places the artwork as if the canvas were this size, at the chosen anchor. The canvas itself keeps its size.')
+    : kind === 'image'
     ? 'Scales the artwork on every layer. Roblox needs templates at exactly 585 × 559, so the canvas itself stays that size.'
     : 'Places the artwork as if the canvas were this size, at the chosen anchor. The template stays 585 × 559 for Roblox.';
   const wRow = slider('Width', 1, 2340, W, 'px'), hRow = slider('Height', 1, 2236, H, 'px');
@@ -2747,7 +2828,8 @@ function renameActive() {
 
 const MENUS = [
   { label: 'File', items: [
-    { label: 'New set', key: 'Ctrl+N', run: () => newSet() },
+    { label: 'Home', run: () => showHome() },
+    { label: 'New project…', key: 'Ctrl+N', run: () => openNewProjectDialog() },
     { label: 'Clear current template', run: () => $('#btnNew').click() },
     { label: 'Open (.stitch, Pixlr .pxz or image)…', key: 'Ctrl+O', run: () => $('#btnOpen').click() },
     { label: 'Save project (.stitch)…', key: 'Ctrl+S', run: () => $('#btnSave').click() },
@@ -2756,8 +2838,8 @@ const MENUS = [
     { label: 'Import image as layer…', key: 'Ctrl+I', run: () => $('#btnImport').click() },
     '-',
     { label: 'Export PNG…', key: 'Ctrl+E', run: () => exportPng() },
-    { label: 'Export set (shirt + pants)…', key: 'Ctrl+Shift+E', run: () => exportSet() },
-    { label: 'Save preview image…', run: () => $('#btnShot').click() },
+    { label: 'Export set (shirt + pants)…', key: 'Ctrl+Shift+E', run: () => exportSet(), off: () => !isTemplate() },
+    { label: 'Save preview image…', run: () => $('#btnShot').click(), off: () => !isTemplate() },
     '-',
     { label: 'Check for updates…', run: () => checkUpdates(true) },
   ] },
@@ -2796,8 +2878,8 @@ const MENUS = [
     '-',
     { label: 'Flip layer horizontal', run: () => flipLayer(true) },
     { label: 'Flip layer vertical', run: () => flipLayer(false) },
-    { label: 'Mirror right → left limb', run: () => $('#lyMirrorRL').click() },
-    { label: 'Mirror left → right limb', run: () => $('#lyMirrorLR').click() },
+    { label: 'Mirror right → left limb', run: () => $('#lyMirrorRL').click(), off: () => !isTemplate() },
+    { label: 'Mirror left → right limb', run: () => $('#lyMirrorLR').click(), off: () => !isTemplate() },
     { label: 'Clear layer (region)', run: () => $('#lyClear').click() },
   ] },
   { label: 'Select', items: [
@@ -3087,7 +3169,7 @@ $('#layerList').addEventListener('contextmenu', (e) => {
 // ------------------------------------------------------------------ live updates (app reloads itself when new files arrive)
 async function flushAutosave() {
   clearTimeout(autosaveTimer);
-  try { if (native) await native.autosaveWrite(serialize()); else localStorage.setItem('stitch-autosave', serialize()); } catch { /* ignore */ }
+  try { await saveDirty(); } catch { /* ignore */ }
 }
 if (native && native.onUpdated) native.onUpdated(async (info) => {
   cancelOp(); await flushAutosave(); saveLayout();
@@ -3127,35 +3209,39 @@ function renderTabs() {
     x.onclick = (e) => { e.stopPropagation(); closeSet(i); };
     t.onclick = () => { if (i !== state.setIdx) switchSet(i); };
     t.onauxclick = (e) => { if (e.button === 1) closeSet(i); };
-    nm.ondblclick = (e) => { e.stopPropagation(); const inp = el('input', 'stab-rename'); inp.value = st.name; nm.replaceWith(inp); inp.focus(); inp.select(); const done = () => { st.name = inp.value.trim() || st.name; renderTabs(); scheduleAutosave(); }; inp.onblur = done; inp.onkeydown = (k) => { k.stopPropagation(); if (k.key === 'Enter') inp.blur(); if (k.key === 'Escape') { inp.value = st.name; inp.blur(); } }; };
+    nm.ondblclick = (e) => { e.stopPropagation(); const inp = el('input', 'stab-rename'); inp.value = st.name; nm.replaceWith(inp); inp.focus(); inp.select(); const done = () => { st.name = inp.value.trim() || st.name; renderTabs(); scheduleAutosave(st); }; inp.onblur = done; inp.onkeydown = (k) => { k.stopPropagation(); if (k.key === 'Enter') inp.blur(); if (k.key === 'Escape') { inp.value = st.name; inp.blur(); } }; };
     t.append(nm, x); bar.append(t);
   });
-  const add = el('button', 'stab-add', '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'); add.title = 'New set (Ctrl+N)'; add.onclick = () => newSet();
+  const add = el('button', 'stab-add', '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'); add.title = 'New project (Ctrl+N)'; add.onclick = () => openNewProjectDialog();
   bar.append(add);
 }
 function leaveCurrent() { if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp(); if (hasSel) deselect(); lasso = null; selPreview = null; arr = null; closePop(); stashSet(); }
 function switchSet(i) {
   leaveCurrent(); state.setIdx = i; const st = state.sets[i];
   state.docs = st.docs; state.swatches = st.swatches; arr = null;
-  setMode(st.mode || 'shirt'); rerenderFills(); renderTabs(); buildOptions(); scheduleAutosave();
+  const resized = applySize(st.w || TW, st.h || TH);
+  const wasDirty = st.dirty;
+  setMode(st.mode || 'shirt'); rerenderFills(); renderTabs(); buildOptions(); saveSessionSoon();
+  st.dirty = wasDirty; // only showing a project isn't an edit
+  if (resized) requestAnimationFrame(zoomFit);
 }
-function newSet(name, select = true) { leaveCurrent(); const st = makeSet(name || 'Untitled ' + (state.sets.length + 1)); state.sets.push(st); if (select) switchSet(state.sets.length - 1); else renderTabs(); return st; }
-function addSet(st) { leaveCurrent(); state.sets.push(st); switchSet(state.sets.length - 1); }
+// shows a new or loaded project in a tab (dropping the empty placeholder); save = it isn't in the library yet
+function addSet(st, save = true) {
+  leaveCurrent(); state.sets = state.sets.filter(s => !s.temp); state.sets.push(st);
+  state.setIdx = -1; switchSet(state.sets.length - 1); hideHome();
+  if (save) scheduleAutosave(st);
+}
+// closing a tab only closes it - the project stays on the Home page
 function closeSet(i) {
+  if (i === state.setIdx) leaveCurrent();
   const st = state.sets[i];
-  const go = () => {
-    if (i === state.setIdx) leaveCurrent();
-    state.sets.splice(i, 1);
-    if (!state.sets.length) state.sets.push(makeSet('Untitled'));
-    const ni = i < state.setIdx ? state.setIdx - 1 : Math.min(state.setIdx, state.sets.length - 1);
-    state.setIdx = -1; state.setIdx = ni; const cur = state.sets[ni]; state.docs = cur.docs; state.swatches = cur.swatches; setMode(cur.mode || 'shirt'); rerenderFills(); renderTabs(); buildOptions(); scheduleAutosave();
-  };
-  const used = Object.values(st.docs).some(d => d.undo.length || d.layers.length > 1);
-  if (!used) { go(); return; }
-  const b = el('div', 'confirm-body'); b.textContent = `Close “${st.name}”? Save it first (File → Save project) if you want to keep it.`;
-  dlg('Close set', b, { okLabel: 'Close', onOk: go });
+  if (st.dirty && !st.temp) { st.dirty = false; saveProject(st).catch(err => console.error('save failed', err)); }
+  state.sets.splice(i, 1);
+  const none = !state.sets.length; if (none) state.sets.push(placeholderSet());
+  const ni = i < state.setIdx ? state.setIdx - 1 : Math.min(state.setIdx, state.sets.length - 1);
+  state.setIdx = -1; switchSet(Math.max(0, ni));
+  if (none) showHome();
 }
-
 // ------------------------------------------------------------------ open-image prompt (Create new / Add current)
 function askOpenImages(files) {
   const body = el('div', 'openimg');
@@ -3163,7 +3249,7 @@ function askOpenImages(files) {
   const row = el('div', 'openimg-row');
   const big = (svg, label, fn) => { const b = el('button', 'openimg-btn', svg); const sp = el('span'); sp.textContent = label; b.append(sp); b.onclick = () => { h.close(); fn(); }; return b; };
   row.append(
-    big('<svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="1"/><path d="M24 17v14M17 24h14"/></svg>', 'Create new', async () => { const st = makeSet(files[0].name.replace(/\.[^.]+$/, '')); addSet(st); for (const f of files) await importImage(f, true); }),
+    big('<svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="1"/><path d="M24 17v14M17 24h14"/></svg>', 'Create new', () => newProjectFromImages(files)),
     big('<svg viewBox="0 0 48 48"><rect x="6" y="16" width="26" height="22" rx="1"/><path d="M12 16v-6h30v22h-10"/><path d="M29 15v12M23 21h12"/></svg>', 'Add current', async () => { for (const f of files) await importImage(f); }),
   );
   body.append(p, row);
@@ -3176,16 +3262,175 @@ async function openFiles(list) {
     else if (/\.(stitch|json)$/i.test(f.name)) { try { const st = await buildSet(JSON.parse(await f.text()), f.name.replace(/\.[^.]+$/, '')); addSet(st); toast('Opened ' + f.name); } catch (err) { toast('Could not open: ' + err.message); } }
     else if (f.type.startsWith('image/')) imgs.push(f);
   }
-  if (imgs.length) askOpenImages(imgs);
+  if (imgs.length) { if (homeOpen()) newProjectFromImages(imgs); else askOpenImages(imgs); }
+}
+
+// ------------------------------------------------------------------ Home page (project library)
+const homeEl = $('#home');
+const homeOpen = () => !homeEl.hidden;
+// switches the working size (W x H) to the project on screen; the shared scratch canvases follow it
+function applySize(w, h) {
+  if (W === w && H === h) return false;
+  W = w; H = h;
+  for (const c of [grpC, selC, tmpC, strokeC, shapeC, view]) { c.width = w; c.height = h; }
+  gradMap = null;
+  return true;
+}
+async function showHome() {
+  if (!homeOpen()) { leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
+  await saveDirty(); // so the cards show the latest pictures
+  await renderHome();
+}
+function hideHome() { if (!homeOpen()) return; homeEl.hidden = true; $('#whatsNew')?.close(); requestAnimationFrame(() => drawOverlay()); }
+function timeAgo(t) {
+  if (!t) return ''; const s = (Date.now() - t) / 1000;
+  return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : s < 172800 ? 'yesterday' : new Date(t).toLocaleDateString();
+}
+async function renderHome() {
+  let list = []; try { list = await lib.list(); } catch (err) { console.error('could not list projects', err); }
+  $('#homeBack').hidden = !state.sets.some(s => !s.temp);
+  $('#homeEmpty').hidden = list.length > 0;
+  const grid = $('#projGrid'); grid.innerHTML = '';
+  for (const m of list) grid.append(projectCard(m));
+}
+function projectCard(m) {
+  const card = el('div', 'proj'); card.tabIndex = 0;
+  const th = el('div', 'proj-thumb' + (m.kind === 'canvas' ? '' : ' tpl'));
+  if (m.thumb) { const img = el('img'); img.src = m.thumb; img.alt = ''; img.draggable = false; th.append(img); }
+  if (state.sets.some(s => s.id === m.id && !s.temp)) { const b = el('span', 'proj-open'); b.textContent = 'Open'; th.append(b); }
+  const info = el('div', 'proj-info'), nm = el('div', 'proj-name'), meta = el('div', 'proj-meta');
+  nm.textContent = m.name || 'Untitled'; nm.title = nm.textContent;
+  meta.textContent = `${m.kind === 'canvas' ? `${m.width} × ${m.height}` : 'Shirt + pants template'} · ${timeAgo(m.updated)}`;
+  info.append(nm, meta);
+  const acts = el('div', 'proj-acts');
+  const act = (cls, svg, title, fn) => { const b = el('button', 'proj-act ' + cls, svg); b.title = title; b.onclick = (e) => { e.stopPropagation(); fn(); }; return b; };
+  acts.append(
+    act('', '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>', 'Duplicate', () => duplicateProject(m)),
+    act('danger', '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>', 'Delete', () => deleteProject(m)),
+  );
+  card.append(th, info, acts);
+  card.onclick = () => openProject(m.id);
+  card.onkeydown = (e) => { if (e.key === 'Enter') openProject(m.id); else if (e.key === 'Delete') deleteProject(m); };
+  return card;
+}
+async function openProject(id) {
+  const i = state.sets.findIndex(s => s.id === id && !s.temp);
+  if (i >= 0) { if (i !== state.setIdx) switchSet(i); hideHome(); return; }
+  try {
+    const txt = await lib.read(id); if (!txt) throw new Error('the project file is missing');
+    addSet(await buildSet(JSON.parse(txt), 'Untitled', id), false);
+  } catch (err) { toast('Could not open: ' + err.message); }
+}
+async function duplicateProject(m) {
+  try {
+    const txt = await lib.read(m.id); if (!txt) throw new Error('the project file is missing');
+    const data = JSON.parse(txt), id = newProjectId(), name = (m.name || 'Untitled') + ' copy', updated = Date.now();
+    data.name = name; data.updated = updated;
+    await lib.write(id, JSON.stringify(data), { ...m, id, name, updated });
+    toast(`Duplicated “${m.name}”`); renderHome();
+  } catch (err) { toast('Could not duplicate: ' + err.message); }
+}
+function deleteProject(m) {
+  confirmDlg('Delete project', `Delete “${m.name}”? This can't be undone.`, 'Delete', async () => {
+    const i = state.sets.findIndex(s => s.id === m.id && !s.temp);
+    if (i >= 0) { state.sets[i].temp = true; closeSet(i); } // temp: closing it mustn't save it again
+    try { await lib.remove(m.id); toast(`Deleted “${m.name}”`); } catch (err) { toast('Could not delete: ' + err.message); }
+    renderHome();
+  });
+}
+// a dropped/opened image becomes its own project: a template if it's exactly 585 x 559, otherwise a canvas the image's size
+async function newProjectFromImages(files) {
+  const img = new Image(); img.src = URL.createObjectURL(files[0]);
+  try { await img.decode(); } catch { toast('Could not read ' + files[0].name); return; } finally { URL.revokeObjectURL(img.src); }
+  const name = files[0].name.replace(/\.[^.]+$/, '') || 'Untitled', tpl = img.naturalWidth === TW && img.naturalHeight === TH;
+  const st = tpl ? makeSet(name) : makeSet(name, 'canvas', clampSide(img.naturalWidth, 1920), clampSide(img.naturalHeight, 1080));
+  if (tpl && /pant|leg|trouser|jean|short/i.test(name)) st.mode = 'pants';
+  addSet(st);
+  for (const f of files) await importImage(f, true);
+}
+const SIZE_PRESETS = [[1920, 1080, 'Full HD'], [1280, 720, 'HD'], [3840, 2160, '4K'], [1080, 1080, 'Square'], [1080, 1920, 'Portrait'], [512, 512, 'Icon']];
+function openNewProjectDialog() {
+  const body = el('div', 'newproj');
+  const nameRow = el('label', 'np-row'), nameIn = el('input'); nameRow.textContent = 'Name';
+  nameIn.type = 'text'; nameIn.value = 'Untitled'; nameIn.maxLength = 80; nameIn.spellcheck = false; nameRow.append(nameIn);
+  let kind = 'template';
+  const types = el('div', 'openimg-row np-types');
+  const typeBtn = (k, svg, label, sub) => { const b = el('button', 'openimg-btn np-type', svg); b.type = 'button'; b.dataset.kind = k; const t = el('span'), s = el('small'); t.textContent = label; s.textContent = sub; b.append(t, s); b.onclick = () => { kind = k; sync(); }; return b; };
+  types.append(
+    typeBtn('template', '<svg viewBox="0 0 48 48"><path d="M17 8l-9 5 3 8 4-2v19h18V19l4 2 3-8-9-5c-1 3-4 5-7 5s-6-2-7-5z"/></svg>', 'Template', 'Roblox shirt + pants, 585 × 559'),
+    typeBtn('canvas', '<svg viewBox="0 0 48 48"><rect x="7" y="11" width="34" height="26" rx="2"/><path d="M7 31l9-8 7 6 5-4 13 10"/><circle cx="31" cy="19" r="3"/></svg>', 'Normal', 'A plain canvas, any size'),
+  );
+  const sizeBox = el('div', 'np-size'), dims = el('div', 'np-dims');
+  const num = (v) => { const i = el('input'); i.type = 'number'; i.min = 1; i.max = MAX_SIDE; i.value = v; i.oninput = sync; return i; };
+  const wIn = num(1920), hIn = num(1080), x = el('span', 'x'), px = el('span', 'x');
+  x.textContent = '×'; px.textContent = 'px';
+  dims.append('Size', wIn, x, hIn, px);
+  const presets = el('div', 'np-presets');
+  for (const [w, h, label] of SIZE_PRESETS) { const b = el('button', 'mini'); b.type = 'button'; b.textContent = `${label} ${w}×${h}`; b.dataset.size = w + 'x' + h; b.onclick = () => { wIn.value = w; hIn.value = h; sync(); }; presets.append(b); }
+  sizeBox.append(dims, presets);
+  const note = el('p', 'np-note'); note.textContent = 'Templates are always 585 × 559, the size Roblox needs. You get Shirt and Pants tabs and the 3D preview.';
+  function sync() {
+    types.querySelectorAll('.np-type').forEach(b => b.classList.toggle('on', b.dataset.kind === kind));
+    sizeBox.hidden = kind !== 'canvas'; note.hidden = kind === 'canvas';
+    presets.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.size === wIn.value + 'x' + hIn.value));
+  }
+  body.append(nameRow, types, sizeBox, note); sync();
+  const h = dlg('New project', body, { okLabel: 'Create', onOk: () => {
+    const name = nameIn.value.trim() || 'Untitled';
+    addSet(kind === 'canvas' ? makeSet(name, 'canvas', clampSide(wIn.value, 1920), clampSide(hIn.value, 1080)) : makeSet(name));
+    toast(`Created “${name}”`);
+  } });
+  nameIn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); h.wrap.querySelector('.pill.primary').click(); } };
+  setTimeout(() => { nameIn.focus(); nameIn.select(); });
+}
+$('#btnHome').onclick = () => showHome();
+$('#homeNew').onclick = () => openNewProjectDialog();
+$('#homeOpen').onclick = () => $('#btnOpen').click();
+$('#homeBack').onclick = () => hideHome();
+let homeDrag = 0;
+homeEl.addEventListener('dragenter', (e) => { if (e.dataTransfer?.types?.includes('Files')) { homeDrag++; homeEl.classList.add('dragging'); } });
+homeEl.addEventListener('dragleave', () => { if (--homeDrag <= 0) { homeDrag = 0; homeEl.classList.remove('dragging'); } });
+homeEl.addEventListener('drop', () => { homeDrag = 0; homeEl.classList.remove('dragging'); });
+
+// ------------------------------------------------------------------ What's new (floats over Home after an update)
+const SEEN_KEY = 'stitch-seen-version';
+async function maybeShowWhatsNew(hadData) {
+  const ver = (native?.version ? await native.version().catch(() => null) : null) || CHANGELOG[0]?.version;
+  let seen = null; try { seen = localStorage.getItem(SEEN_KEY); localStorage.setItem(SEEN_KEY, ver); } catch { /* storage unavailable */ }
+  if (!ver || seen === ver || (!seen && !hadData)) return; // same version, or a brand-new install
+  const items = seen ? CHANGELOG.filter(c => cmpVersion(c.version, seen) > 0 && cmpVersion(c.version, ver) <= 0) : CHANGELOG.filter(c => c.version === ver);
+  if (items.length) showWhatsNew(ver, items);
+}
+function cmpVersion(a, b) { const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; } return 0; }
+function showWhatsNew(ver, items) {
+  $('#whatsNew')?.close();
+  const card = el('div', 'whatsnew'); card.id = 'whatsNew'; card.setAttribute('role', 'dialog');
+  const x = el('button', 'wn-x', '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>'); x.title = 'Close';
+  const h = el('h3'); h.textContent = 'What’s new'; const sub = el('div', 'wn-ver'); sub.textContent = 'Stitch Editor ' + ver;
+  card.append(x, h, sub);
+  for (const it of items) {
+    if (items.length > 1) { const v = el('div', 'wn-sub'); v.textContent = it.version; card.append(v); }
+    const ul = el('ul'); for (const n of it.notes) { const li = el('li'); li.textContent = n; ul.append(li); } card.append(ul);
+  }
+  const ok = el('button', 'primary wn-ok'); ok.textContent = 'Got it'; card.append(ok);
+  const outside = (e) => { if (!card.contains(e.target)) card.close(); };
+  const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); card.close(); } };
+  card.close = () => { card.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc, true); };
+  x.onclick = ok.onclick = () => card.close();
+  document.body.append(card);
+  setTimeout(() => { document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', esc, true); });
 }
 
 // ------------------------------------------------------------------ boot
 (async function boot() {
-  const restored = await loadAutosave();
-  buildRegionSelect(); setTool('brush'); renderTabs(); setMode(state.mode); rebuildLayers(); changed();
+  await templateImg.decode().catch(() => {});
+  const { hadData } = await loadSession();
+  const cur = state.sets[state.setIdx]; state.docs = cur.docs; state.swatches = cur.swatches; applySize(cur.w || TW, cur.h || TH);
+  buildRegionSelect(); setTool('brush'); renderTabs(); setMode(cur.mode || 'shirt'); rebuildLayers(); changed();
+  for (const s of state.sets) s.dirty = false; // just loaded - nothing to save yet
+  sessionReady = true; saveDirty();
   requestAnimationFrame(zoomFit);
-  window.addEventListener('resize', () => {});
   addRecent('#d23c3c'); addRecent('#1f2a44'); addRecent('#ffffff'); addRecent('#111111');
-  if (restored) toast('Restored your last session');
-})();
-window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };
+  await showHome();
+  maybeShowWhatsNew(hadData);
+})();window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };

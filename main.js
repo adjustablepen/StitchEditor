@@ -16,6 +16,9 @@ function createWindow() {
   });
 }
 
+// testing: keep settings, autosave and projects in another folder so the real ones aren't touched
+if (process.env.STITCH_USER_DATA) app.setPath('userData', process.env.STITCH_USER_DATA);
+
 Menu.setApplicationMenu(null);
 app.setAppUserModelId('com.adjustapen.stitcheditor');
 
@@ -63,16 +66,41 @@ ipcMain.handle('save-files', async (e, { title, files }) => {
   return dir;
 });
 
+// autosave.stitch holds the session (which projects are open). Up to 0.3.x it held every open tab, so the
+// first write after updating keeps that old file as a backup.
 const autosavePath = () => path.join(app.getPath('userData'), 'autosave.stitch');
+const legacyBackupPath = () => path.join(app.getPath('userData'), 'autosave-0.3-backup.stitch');
 ipcMain.handle('autosave-write', async (e, data) => {
-  const tmp = autosavePath() + '.tmp';
-  await fs.writeFile(tmp, data, 'utf8');
-  await fs.rename(tmp, autosavePath());
+  if (!fsw.existsSync(legacyBackupPath()) && fsw.existsSync(autosavePath())) {
+    const cur = await fs.readFile(autosavePath(), 'utf8').catch(() => '');
+    if (cur && !cur.slice(0, 200).includes('"session":')) await fs.copyFile(autosavePath(), legacyBackupPath());
+  }
+  await writeAtomic(autosavePath(), data);
   return true;
 });
 ipcMain.handle('autosave-read', async () => {
   try { return await fs.readFile(autosavePath(), 'utf8'); } catch { return null; }
 });
+
+// Project library (Home page): projects/<id>.stitch is the project, projects/<id>.json its name, kind, size and thumbnail
+const projDir = () => path.join(app.getPath('userData'), 'projects');
+const projFile = (id, ext) => { if (!/^[\w-]{1,80}$/.test(String(id))) throw new Error('bad project id'); return path.join(projDir(), id + ext); };
+// write to a temp file then rename, so a crash never leaves half a file; unique temp names let writes overlap safely
+let tmpN = 0;
+async function writeAtomic(file, data) { const tmp = `${file}.${++tmpN}.tmp`; await fs.writeFile(tmp, data, 'utf8'); await fs.rename(tmp, file); }
+ipcMain.handle('projects-list', async () => {
+  let names = []; try { names = await fs.readdir(projDir()); } catch { return []; }
+  const out = [];
+  for (const n of names) if (n.endsWith('.json')) { try { out.push(JSON.parse(await fs.readFile(path.join(projDir(), n), 'utf8'))); } catch { /* skip unreadable */ } }
+  return out.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+});
+ipcMain.handle('project-read', async (e, id) => { try { return await fs.readFile(projFile(id, '.stitch'), 'utf8'); } catch { return null; } });
+ipcMain.handle('project-write', async (e, id, data, meta) => {
+  await fs.mkdir(projDir(), { recursive: true });
+  await writeAtomic(projFile(id, '.stitch'), data); await writeAtomic(projFile(id, '.json'), JSON.stringify(meta));
+  return true;
+});
+ipcMain.handle('project-delete', async (e, id) => { for (const ext of ['.stitch', '.json']) await fs.rm(projFile(id, ext), { force: true }); return true; });
 
 // Live updates: when files in the app folder change, save + reload the window (or relaunch if main/preload changed).
 let updTimer = null, needRelaunch = false;
@@ -81,7 +109,7 @@ function watchForUpdates() {
     fsw.watch(__dirname, { recursive: true }, (ev, file) => {
       if (!file || installing) return;
       const f = String(file).replace(/\\/g, '/');
-      if (/(^|\/)(main\.js|preload\.js|package\.json)$/.test(f)) needRelaunch = true;
+      if (/^(main\.js|preload\.js|package\.json)$/.test(f)) needRelaunch = true; // top level only - not node_modules/**/package.json
       else if (!/^src\//.test(f)) return;
       clearTimeout(updTimer);
       updTimer = setTimeout(() => {

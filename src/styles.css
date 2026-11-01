@@ -606,3 +606,74 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 .sw-row.dragging { opacity: .35; }
 .sw-list-dragging, .sw-list-dragging * { cursor: grabbing !important; }
 .sw-drop { height: 2px; margin: -1px 4px; background: var(--accent); border-radius: 1px; pointer-events: none; }
+
+/* ---- normal (non-template) canvases: no shirt/pants, preview or template overlays */
+body.canvas-mode .topbar .tabs, body.canvas-mode #previewPanel, body.canvas-mode .opt:has(#optUnderlay), body.canvas-mode .opt:has(#optGuides),
+body.canvas-mode .opt:has(#optShade), body.canvas-mode .opt.region, body.canvas-mode #lyMirrorRL, body.canvas-mode #lyMirrorLR,
+body.canvas-mode #panelsMenu label:has([data-panel="previewPanel"]) { display: none !important; }
+
+/* ---- Home page */
+.home-btn { width: 32px; height: 32px; padding: 0; margin-right: -8px; display: grid; place-items: center; background: transparent; border-color: transparent; color: #cfcfcf; }
+.home-btn:hover { background: #333; border-color: #3f3f3f; color: #fff; }
+.home-btn svg { width: 19px; height: 19px; }
+.home { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; flex-direction: column; }
+.home[hidden] { display: none; }
+.home-top { height: 46px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: #222; border-bottom: 1px solid var(--edge); }
+.home-grow { flex: 1; }
+.home-body { flex: 1; overflow: auto; padding: 28px 40px 40px; user-select: none; }
+.home-actions { display: flex; gap: 14px; margin-bottom: 30px; }
+.home-big { width: 220px; height: 128px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: #282828; border: 1px solid #333; border-radius: 10px; color: #e6e6e6; }
+.home-big:hover { background: #303030; border-color: var(--accent); }
+.home-big svg { width: 44px; height: 44px; stroke-width: 1.6; color: var(--accent); margin-bottom: 2px; }
+.home-big span { font-size: 14px; font-weight: 600; }
+.home-big small { color: var(--muted); font-size: 12px; }
+.home-h { margin: 0 0 14px; font-size: 15px; font-weight: 600; color: #d8d8d8; }
+.home-empty { color: var(--muted); font-size: 13.5px; }
+.proj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.proj { position: relative; background: #282828; border: 1px solid #333; border-radius: 10px; overflow: hidden; cursor: pointer; outline: none; }
+.proj:hover, .proj:focus-visible { border-color: var(--accent); }
+.proj-thumb { position: relative; aspect-ratio: 16 / 10; display: grid; place-items: center; padding: 10px;
+  background: #1c1c1c repeating-conic-gradient(#232323 0 25%, #1c1c1c 0 50%) 0 0 / 16px 16px; border-bottom: 1px solid #333; }
+.proj-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto; }
+.proj-thumb.tpl { background: #1f1f1f; }
+.proj-open { position: absolute; left: 8px; top: 8px; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: var(--accent); color: #fff; }
+.proj-info { padding: 9px 12px 11px; }
+.proj-name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 60px; }
+.proj-meta { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-acts { position: absolute; right: 8px; bottom: 9px; display: flex; gap: 4px; opacity: 0; transition: opacity .12s; }
+.proj:hover .proj-acts, .proj:focus-within .proj-acts { opacity: 1; }
+.proj-act { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; background: #333; }
+.proj-act svg { width: 16px; height: 16px; }
+.proj-act.danger:hover { color: var(--danger); border-color: var(--danger); }
+.home-drop { position: absolute; inset: 0; display: none; place-items: center; background: rgba(0,153,204,.12); border: 2px dashed var(--accent); pointer-events: none; }
+.home-drop div { background: var(--accent); color: #fff; font-weight: 600; font-size: 15px; padding: 10px 20px; border-radius: 999px; }
+.home.dragging .home-drop { display: grid; }
+
+/* ---- New project dialog */
+.dlg:has(.newproj) { width: 470px; }
+.np-row { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 10px; color: #d8d8d8; font-weight: 600; }
+.np-row input[type=text] { background: #242424; border: 1px solid #3a3a3a; border-radius: 5px; padding: 6px 8px; user-select: text; }
+.np-types { padding-bottom: 0 !important; }
+.np-type { gap: 6px !important; outline: 2px solid transparent; }
+.np-type small { color: var(--muted); font-size: 12px; }
+.np-type.on { outline-color: var(--accent); background: #404040; }
+.np-size { display: flex; flex-direction: column; gap: 10px; }
+.np-size[hidden], .np-note[hidden] { display: none; }
+.np-dims { display: flex; align-items: center; gap: 8px; color: #d8d8d8; }
+.np-dims input { width: 76px; padding: 5px 6px; }
+.np-dims .x { color: var(--muted); }
+.np-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.np-presets button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.np-note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+
+/* ---- What's new (floats over Home after an update) */
+.whatsnew { position: fixed; right: 24px; bottom: 24px; z-index: 45; width: 380px; max-height: calc(100vh - 100px); overflow: auto; background: #2b2b2b; border: 1px solid #3f3f3f; border-radius: 12px; padding: 18px 20px 16px; box-shadow: 0 24px 70px rgba(0,0,0,.6); }
+.whatsnew h3 { margin: 0; font-size: 16px; }
+.wn-ver { color: var(--accent); font-size: 12.5px; font-weight: 600; margin-top: 2px; }
+.wn-sub { color: #bdbdbd; font-weight: 600; margin-top: 10px; }
+.whatsnew ul { margin: 10px 0 0; padding-left: 18px; color: #d0d0d0; line-height: 1.5; }
+.whatsnew li { margin: 3px 0; }
+.wn-x { position: absolute; right: 10px; top: 10px; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: #cfcfcf; display: grid; place-items: center; border-radius: 6px; }
+.wn-x:hover { background: #3a3a3a; color: #fff; }
+.wn-x svg { width: 18px; height: 18px; stroke-width: 2.4; }
+.wn-ok { display: block; margin: 14px 0 0 auto; }

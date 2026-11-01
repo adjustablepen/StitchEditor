@@ -18,6 +18,8 @@ To build a standalone Windows app instead: `npm run build:win` (the output goes 
 
 ## Features
 
+- **Home page** with all your projects (autosaved, with previews). Create new, open a file or drop one in, duplicate or delete projects. The house button (top left) goes back to Home.
+- **Two project types.** *Template*: Roblox shirt + pants at 585 × 559 with the 3D preview. *Normal*: a plain canvas of any size (1920 × 1080 by default). `.stitch` files remember which type they are.
 - **Shirt and Pants tabs.** Each has its own layers and undo history, and the preview shows both together. Tab switches between them.
 - **Live 3D preview** with R6/R15 rigs, skin colour, a spin toggle and "Save image" (handy for catalog thumbnails).
 - **Tools:** brush (B), pencil for hard pixels (P), eraser (E), fill (G, Shift+click fills a whole region), gradient (D), eyedropper (I, or Alt+click), rectangle (U), ellipse (O), line (L), text (T) and move (V, arrow keys nudge).

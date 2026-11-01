@@ -1,7 +1,7 @@
 {
   "name": "stitch-studio",
   "productName": "Stitch Editor",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Stitch Editor - image and template editor with a live 3D character preview",
   "main": "main.js",
   "private": true,
@@ -13,7 +13,8 @@
   },
   "devDependencies": {
     "electron": "33.2.1",
-    "electron-builder": "25.1.8"
+    "electron-builder": "25.1.8",
+    "rcedit": "^4.0.1"
   },
   "build": {
     "appId": "com.adjustapen.stitchstudio",

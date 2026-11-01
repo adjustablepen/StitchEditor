@@ -16,6 +16,7 @@ unzip -q "$BASE_ZIP" -d "$STAGE"
 APPDIR="$STAGE/Stitch Editor"
 rm -rf "$APPDIR/resources/app"; mkdir -p "$APPDIR/resources/app"
 unzip -q "dist/StitchEditor-update-v$VERSION.zip" -d "$APPDIR/resources/app"
+node tools/brand-exe.js "$APPDIR/Stitch Editor.exe" # otherwise Task Manager lists it as "Electron"
 cd installer
 "$MAKENSIS" -V2 -DVERSION="$VERSION" -DSRC="$APPDIR" -DOUT="../dist/StitchEditor-Setup-v$VERSION.exe" installer.nsi
 rm -rf "$STAGE"

@@ -5,7 +5,7 @@ If the release tag (e.g. `v0.3.0`) is newer than the installed version, it asks:
 **Install now** · **Remind me later** (or ×, asks again next launch) · **Skip this version**.
 
 ## Publishing a new version
-1. Bump `"version"` in `package.json` (e.g. 0.2.0 → 0.3.0).
+1. Bump `"version"` in `package.json` (e.g. 0.2.0 → 0.3.0) and add that version to `src/changelog.js` - it is shown in the "What's new" card on Home after users update.
 2. Run `npm run pack-update` → creates `dist/StitchEditor-update-v0.3.0.zip`.
 3. On GitHub: Releases → *Draft a new release* → tag `v0.3.0`, write the notes (they show in the update prompt),
    attach the update zip **and** `StitchEditor-Setup-v0.3.0.exe` (the installer for new users) → *Publish*.
