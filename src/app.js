@@ -163,7 +163,7 @@ let histLabel = null;
 function labelled(label, fn) { const prev = histLabel; histLabel = label; try { return fn(); } finally { histLabel = prev; } }
 function pushHistory(entry) {
   const d = doc(); editVersion++; entry.label = entry.label || histLabel || TOOL_LABELS[state.tool] || 'Edit'; d.undo.push(entry);
-  if (d.undo.length > maxHistory()) d.undo.shift();
+  while (d.undo.length > maxHistory()) d.undo.shift();
   d.redo.length = 0; changed();
 }
 function pushPixels(layer, before, vb) { const e = { t: 'px', id: layer.id, before, after: layer.ctx.getImageData(0, 0, W, H) }; if (vb !== undefined || layer.vec) { e.vb = clone(vb); e.va = clone(layer.vec); } pushHistory(e); }
@@ -187,6 +187,7 @@ function applyEntry(e, key) {
   else if (e.t === 'sw') { const s = swatchById(e.id); if (s) { s.paint = clone(e[key]); rerenderFills(); } }
   else if (e.t === 'swo') { const ids = e[key]; state.swatches.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); renderSwatches(); scheduleAutosave(); }
   else if (e.t === 'prop') { const l = doc().layers.find(x => x.id === e.id); if (l) l[e.key] = e[key]; }
+  else if (e.t === 'sz') { setProjectSize(e[key].w, e[key].h); restoreStruct(e[key].struct); }
   else restoreStruct(e[key]);
 }
 function undo() { if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp(); const d = doc(), e = d.undo.pop(); if (!e) return; applyEntry(e, 'before'); d.redo.push(e); changed(); rebuildLayers(); }
@@ -2224,7 +2225,11 @@ $('#btnShot').onclick = () => { if (preview) saveDataUrl(preview.snapshot(), 'pr
 // ------------------------------------------------------------------ files
 function toast(msg) { setStatusMsg(msg); }
 let msgTimer;
-function setStatusMsg(msg) { const el = $('#stMsg'); el.textContent = msg; el.style.opacity = 1; clearTimeout(msgTimer); msgTimer = setTimeout(() => { el.style.opacity = 0; }, 3500); }
+// shown in the status bar, and on Home too (which covers the status bar)
+function setStatusMsg(msg) {
+  const els = [$('#stMsg'), $('#homeMsg')]; for (const e of els) { e.textContent = msg; e.style.opacity = 1; }
+  clearTimeout(msgTimer); msgTimer = setTimeout(() => { for (const e of els) e.style.opacity = 0; }, 3500);
+}
 
 async function saveDataUrl(dataUrl, name, label, ext) {
   const b64 = dataUrl.split(',')[1];
@@ -2485,7 +2490,8 @@ function makeDraggable(handle, onMove, onEnd) {
     handle.addEventListener('pointermove', mv); handle.addEventListener('pointerup', up);
   });
 }
-function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = 'Cancel', onClose, compare, extra, noFoot } = {}) {
+// center: fixed in the middle of the window (not draggable); outsideClose: clicking outside the dialog cancels it
+function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = 'Cancel', onClose, compare, extra, noFoot, center, outsideClose } = {}) {
   const wrap = document.createElement('div'); wrap.className = 'modal';
   const box = document.createElement('div'); box.className = 'dlg';
   const head = document.createElement('div'); head.className = 'dlg-head';
@@ -2515,8 +2521,11 @@ function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = '
   let px = dlgPos ? dlgPos.x : (window.innerWidth - bw) / 2, py = dlgPos ? dlgPos.y : (window.innerHeight - bh) / 2;
   const place = () => { px = Math.max(0, Math.min(window.innerWidth - bw, px)); py = Math.max(0, Math.min(window.innerHeight - 46, py)); box.style.left = px + 'px'; box.style.top = py + 'px'; };
   place();
-  makeDraggable(head, (dx, dy) => { px += dx; py += dy; place(); }, () => { dlgPos = { x: px, y: py }; });
-  const close = () => { wrap.remove(); document.removeEventListener('keydown', key, true); };
+  if (center) box.classList.add('dlg-center');
+  else makeDraggable(head, (dx, dy) => { px += dx; py += dy; place(); }, () => { dlgPos = { x: px, y: py }; });
+  const outside = (e) => { if (!box.contains(e.target)) doCancel(); };
+  if (outsideClose) setTimeout(() => document.addEventListener('pointerdown', outside, true));
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside, true); };
   const doCancel = () => { onCancel?.(); close(); };
   const doOk = () => { if (onOk?.() !== false) close(); };
   const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); doCancel(); } else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.matches('input[type=text], input:not([type])')) { e.stopPropagation(); e.preventDefault(); doOk(); } };
@@ -2765,7 +2774,58 @@ function anchorGrid(initial = 4) {
   for (let i = 0; i < 9; i++) { const b = document.createElement('button'); b.type = 'button'; b.className = i === initial ? 'on' : ''; b.onclick = () => { g.value = i; g.querySelectorAll('button').forEach((x, j) => x.classList.toggle('on', j === i)); g.dispatchEvent(new Event('change', { bubbles: true })); }; g.append(b); }
   return g;
 }
+// ---- real resizing for normal canvases (templates must stay 585 x 559, so they use sizeDialog below)
+// changes the size of the open project: its docs, the view and the scratch canvases
+function setProjectSize(w, h) {
+  const st = state.sets[state.setIdx]; st.w = w; st.h = h;
+  for (const d of Object.values(st.docs)) d.comp = mkCanvas(w, h);
+  applySize(w, h); if (hasSel) deselect(); // resizing the selection canvas empties it
+  requestAnimationFrame(zoomFit);
+}
+// kind 'image' scales everything to nw x nh; 'canvas' adds/trims space around it, keeping the anchor (0-8, like anchorGrid) in place
+function resizeProject(kind, nw, nh, anchor) {
+  if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp(); if (hasSel) deselect(); arr = null;
+  const ow = W, oh = H, sx = nw / ow, sy = nh / oh;
+  const dx = Math.round((nw - ow) * (anchor % 3) / 2), dy = Math.round((nh - oh) * Math.floor(anchor / 3) / 2);
+  const before = { w: ow, h: oh, struct: snapStruct() };
+  const redraw = (src) => { const c = mkCanvas(nw, nh), x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; if (kind === 'image') x.drawImage(src, 0, 0, nw, nh); else x.drawImage(src, dx, dy); return c; };
+  for (const l of doc().layers) {
+    const v = l.vec;
+    if (v?.type === 'fill') { // colour fills keep working: move their mask along with the pixels
+      const m = redraw(maskCanvas(v.mask)), url = m.toDataURL(); maskCache.set(url, m); v.mask = url;
+      if (v.bb) v.bb = kind === 'image' ? [v.bb[0] * sx, v.bb[1] * sy, v.bb[2] * sx, v.bb[3] * sy] : [v.bb[0] + dx, v.bb[1] + dy, v.bb[2], v.bb[3]];
+    } else if (v && kind === 'image') { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; } // scaled text/shapes become pixels, like rotate/flip
+    else if (v) shiftVec(v, dx, dy);
+    l.canvas = redraw(l.canvas); l.ctx = ctxOf(l.canvas);
+  }
+  setProjectSize(nw, nh);
+  pushHistory({ t: 'sz', label: kind === 'image' ? 'Image size' : 'Canvas size', before, after: { w: nw, h: nh, struct: snapStruct() } });
+  rebuildLayers(); buildOptions(); requestRender();
+  toast(`${kind === 'image' ? 'Image' : 'Canvas'} is now ${nw} × ${nh} (Ctrl+Z to undo)`);
+}
+function resizeDialog(kind) {
+  const body = el('div', 'adj-body size-body'), note = el('p', 'adj-note');
+  note.textContent = kind === 'image'
+    ? `Scales the whole picture, every layer included. It's ${W} × ${H} now.`
+    : `Adds or trims space around the picture without scaling it. The anchor is the part that stays put. It's ${W} × ${H} now.`;
+  const wRow = slider('Width', 1, MAX_SIDE, W, 'px'), hRow = slider('Height', 1, MAX_SIDE, H, 'px');
+  wRow.querySelector('input[type=range]').max = hRow.querySelector('input[type=range]').max = Math.min(MAX_SIDE, Math.max(4000, W * 2, H * 2));
+  const lock = el('label', 'switch-row'); lock.innerHTML = '<span>Keep proportions</span><input type="checkbox" class="switch" checked>';
+  const keep = () => lock.querySelector('input').checked;
+  wRow.addEventListener('change', () => { if (keep()) hRow.set(Math.max(1, Math.round(wRow.value() * H / W))); });
+  hRow.addEventListener('change', () => { if (keep()) wRow.set(Math.max(1, Math.round(hRow.value() * W / H))); });
+  const pct = el('div', 'pct-row');
+  for (const v of [50, 75, 100, 125, 150, 200]) { const b = el('button', 'mini'); b.textContent = v + '%'; b.onclick = () => { wRow.set(clampSide(W * v / 100, W)); hRow.set(clampSide(H * v / 100, H)); }; pct.append(b); }
+  body.append(note, wRow, hRow, lock, pct);
+  let anchor = null;
+  if (kind === 'canvas') { anchor = anchorGrid(4); const a = el('div', 'anchor-row', '<span class="sl-label">Anchor</span>'); a.append(anchor); body.append(a); }
+  dlg(kind === 'image' ? 'Image size' : 'Canvas size', body, { onOk: () => {
+    const nw = clampSide(wRow.value(), W), nh = clampSide(hRow.value(), H);
+    if (nw !== W || nh !== H) resizeProject(kind, nw, nh, anchor ? anchor.value : 0);
+  } });
+}
 function sizeDialog(kind) {
+  if (!isTemplate()) return resizeDialog(kind);
   const body = document.createElement('div'); body.className = 'adj-body size-body';
   const note = document.createElement('p'); note.className = 'adj-note';
   note.textContent = !isTemplate()
@@ -3354,7 +3414,7 @@ async function newProjectFromImages(files) {
     big(CANVAS_ICON, 'Normal', `A plain canvas, ${w} × ${h}`, () => create(makeSet(name, 'canvas', w, h))),
   );
   body.append(p, row);
-  const hd = dlg('New project', body, { noFoot: true });
+  const hd = dlg('New project', body, { noFoot: true, center: true, outsideClose: true });
 }
 const SIZE_PRESETS = [[1920, 1080, 'Full HD'], [1280, 720, 'HD'], [3840, 2160, '4K'], [1080, 1080, 'Square'], [1080, 1920, 'Portrait'], [512, 512, 'Icon']];
 function openNewProjectDialog() {
@@ -3383,7 +3443,7 @@ function openNewProjectDialog() {
     presets.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.size === wIn.value + 'x' + hIn.value));
   }
   body.append(nameRow, types, sizeBox, note); sync();
-  const h = dlg('New project', body, { okLabel: 'Create', onOk: () => {
+  const h = dlg('New project', body, { okLabel: 'Create', center: true, outsideClose: true, onOk: () => {
     const name = nameIn.value.trim() || 'Untitled';
     addSet(kind === 'canvas' ? makeSet(name, 'canvas', clampSide(wIn.value, 1920), clampSide(hIn.value, 1080)) : makeSet(name));
     toast(`Created “${name}”`);
@@ -3395,6 +3455,11 @@ $('#btnHome').onclick = () => showHome();
 $('#homeNew').onclick = () => openNewProjectDialog();
 $('#homeOpen').onclick = () => $('#btnOpen').click();
 $('#homeBack').onclick = () => hideHome();
+$('#homeUpdates').onclick = async () => {
+  const b = $('#homeUpdates'); b.disabled = true; b.textContent = 'Checking…';
+  try { await checkUpdates(true); } finally { b.disabled = false; b.textContent = 'Check for updates'; }
+};
+native?.version?.().then(v => { $('#homeVer').textContent = 'Version ' + v; }).catch(() => {});
 let homeDrag = 0;
 homeEl.addEventListener('dragenter', (e) => { if (e.dataTransfer?.types?.includes('Files')) { homeDrag++; homeEl.classList.add('dragging'); } });
 homeEl.addEventListener('dragleave', () => { if (--homeDrag <= 0) { homeDrag = 0; homeEl.classList.remove('dragging'); } });
