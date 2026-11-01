@@ -24,3 +24,7 @@ so updates are small. The Setup.exe is only needed for brand-new installs.
 ## Keeping it "public but nobody can contribute"
 Only you (and collaborators you add) can push. In Settings you can untick *Issues*, and under
 *Moderation options → Interaction limits* restrict who can open pull requests or comment.
+
+## Tag format
+From 0.3.1 on, the updater accepts both `v0.4.0` and `v.0.4.0`. Copies still on 0.3.0 or older only understand
+`v0.4.0`, which is why v0.3.1 itself was tagged without the dot.

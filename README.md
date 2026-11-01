@@ -1,4 +1,6 @@
 # Stitch Editor
+Making Roblox Clothing Easier
+
 
 A desktop editor for Roblox classic **shirt and pants templates** (585 × 559) with a live 3D character preview.
 

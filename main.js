@@ -100,7 +100,7 @@ const UPDATE_REPO = 'adjustablepen/StitchEditor';
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 function readSettings() { try { return JSON.parse(fsw.readFileSync(settingsPath(), 'utf8')); } catch { return {}; } }
 function writeSettings(s) { try { fsw.writeFileSync(settingsPath(), JSON.stringify(s, null, 2)); } catch { /* ignore */ } }
-function cmpVer(a, b) { const pa = String(a).replace(/^v/i, '').split(/[.-]/).map(n => parseInt(n, 10) || 0), pb = String(b).replace(/^v/i, '').split(/[.-]/).map(n => parseInt(n, 10) || 0); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; }
+function cmpVer(a, b) { const pa = String(a).replace(/^v\.?/i, '').split(/[.-]/).map(n => parseInt(n, 10) || 0), pb = String(b).replace(/^v\.?/i, '').split(/[.-]/).map(n => parseInt(n, 10) || 0); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; }
 let latest = null, installing = false;
 async function checkForUpdate(manual) {
   try {
@@ -117,7 +117,7 @@ async function checkForUpdate(manual) {
       if (!list.length) return { status: 'none', message: 'the repo has no published releases (drafts don\'t count)', current: app.getVersion() };
       rel = list[0];
     }
-    const ver = String(rel.tag_name || '').replace(/^v/i, '');
+    const ver = String(rel.tag_name || '').replace(/^v\.?/i, '');
     const assets = rel.assets || [], asset = assets.find(a => /update.*\.zip$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name) && a.size < 20e6);
     if (!ver || cmpVer(ver, app.getVersion()) <= 0) return { status: 'latest', current: app.getVersion() };
     if (!manual && readSettings().skipVersion === ver) return { status: 'skipped', version: ver, current: app.getVersion() };
