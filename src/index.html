@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: blob: https://fonts.gstatic.com; connect-src 'self' data: blob:; script-src 'self'">
+<title>Stitch Editor</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img class="logo" src="logo-mark.svg" alt="">Stitch Editor</div>
+  <nav class="menubar" id="menubar"></nav>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-mode="shirt">Shirt</button>
+    <button class="tab" data-mode="pants">Pants</button>
+  </div>
+  <div class="actions">
+    <span hidden><button id="btnNew"></button><button id="btnOpen"></button><button id="btnSave"></button><button id="btnImport"></button></span>
+    <div class="menu-wrap"><button id="btnPanels" title="Show or hide panels">Panels ▾</button>
+      <div class="dropdown" id="panelsMenu" hidden>
+        <label><input type="checkbox" data-panel="previewPanel" checked> Preview</label>
+        <label><input type="checkbox" data-panel="layersPanel" checked> Layers</label>
+        <label><input type="checkbox" data-panel="coloursPanel" checked> Colours</label>
+        <label><input type="checkbox" data-panel="historyPanel" checked> History</label>
+        <div class="dd-sep"></div>
+        <button id="layoutDock">Reset dock</button>
+        <button id="layoutSave">Save as my default</button>
+        <button id="layoutReset">Reset to my default</button>
+      </div></div>
+    <button id="btnExport" class="primary" title="Export the current template as a 585×559 PNG (Ctrl+E)">Export PNG</button>
+    <span class="sep"></span>
+    <button id="btnUndo" class="icon" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
+    <button id="btnRedo" class="icon" title="Redo (Ctrl+Y)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+  </div>
+</header>
+
+<div class="optionsbar" id="optionsbar">
+  <div class="ob-left" id="optLeft"></div>
+  <div class="spacer"></div>
+  <label class="opt" title="Show the Roblox template over your work, exactly as it will export (export always includes it)"><input type="checkbox" id="optUnderlay" checked> Template</label>
+  <label class="opt"><input type="checkbox" id="optGuides" checked> Guides</label>
+  <label class="opt"><input type="checkbox" id="optShade"> Dim unused</label>
+</div>
+
+<main class="main">
+  <nav class="toolbar" id="toolbar">
+    <div class="tool-grid">
+      <button data-tool="move" title="Move layer (V)"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/><path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg></button>
+      <button data-tool="select" title="Select (M)"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1" stroke-dasharray="3 2.5"/></svg></button>
+      <button data-tool="lasso" title="Lasso (L)"><svg viewBox="0 0 24 24"><path d="M7 15c-3-2-3-7 3-9s10 0 10 4-5 6-9 6c-2 0-3-1-4-1z"/><path d="M7 15c-1 2 0 4 2 5"/></svg></button>
+      <button data-tool="wand" title="Magic select (W)"><svg viewBox="0 0 24 24"><path d="M4 20L15 9"/><path d="M15 9l2-2"/><path d="M17 3v2M21 7h-2M19.5 4.5l-1.2 1.2M12 4l.6 1.4M20 12l-1.4-.6"/></svg></button>
+      <button data-tool="brush" title="Brush (B)"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 8.4 14z"/><path d="M8 15c-2 0-4 1.5-4 4 0 .7-.4 1.3-1 1.5 4 .8 7-.6 7-3.5"/></svg></button>
+      <button data-tool="eraser" title="Eraser (E)"><svg viewBox="0 0 24 24"><path d="M7 20h13"/><path d="M4.5 14.5L14 5l6 6-8.5 8.5H9z"/><path d="M9.5 9.5l6 6"/></svg></button>
+      <button data-tool="pencil" title="Pencil - hard pixels (P)"><svg viewBox="0 0 24 24"><path d="M15 4l5 5L9 20H4v-5z"/><path d="M13 6l5 5"/></svg></button>
+      <button data-tool="fill" title="Fill bucket (G)"><svg viewBox="0 0 24 24"><path d="M4 12l7-7 8 8-7 7z"/><path d="M4 12h15"/><path d="M20.5 16s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z"/></svg></button>
+      <button data-tool="gradient" title="Gradient (D)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M13 4v16M18 4v16" stroke-dasharray="2 2"/></svg></button>
+      <button data-tool="eyedropper" title="Eyedropper (I)"><svg viewBox="0 0 24 24"><path d="M14 6l4 4"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l-2-2z"/><path d="M15 8l-9 9-1 3 3-1 9-9"/></svg></button>
+      <button data-tool="shape" title="Shape (U)"><svg viewBox="0 0 24 24"><rect x="3.5" y="9" width="10" height="10" rx="1"/><circle cx="15" cy="9" r="5.5"/></svg></button>
+      <button data-tool="pen" title="Pen (K)"><svg viewBox="0 0 24 24"><path d="M12 19l7-7 3 3-7 7z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18z"/><path d="M2 2l7.6 7.6"/><circle cx="11" cy="11" r="2"/></svg></button>
+      <button data-tool="text" title="Text (T)"><svg viewBox="0 0 24 24"><path d="M5 7V5h14v2"/><path d="M12 5v14"/><path d="M9 19h6"/></svg></button>
+      <button data-tool="hand" title="Hand - pan the canvas (H, or hold Space)"><svg viewBox="0 0 24 24"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11"/><path d="M11 10.5V4a1.5 1.5 0 0 1 3 0v6.5"/><path d="M14 10.5V5.5a1.5 1.5 0 0 1 3 0V12"/><path d="M17 9.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L3.6 15a1.6 1.6 0 0 1 2.4-2l2 2"/></svg></button>
+    </div>
+    <div class="colors">
+      <div class="color-pair">
+        <input type="color" id="colBg" value="#ffffff" title="Secondary colour">
+        <input type="color" id="colFg" value="#d23c3c" title="Primary colour">
+        <button class="swap" id="btnSwap" title="Swap colours (X)"><svg viewBox="0 0 24 24"><path d="M7 4l-3 3 3 3"/><path d="M4 7h11a5 5 0 0 1 5 5v1"/><path d="M17 20l3-3-3-3"/><path d="M20 17H9a5 5 0 0 1-5-5v-1"/></svg></button>
+      </div>
+      <div class="recent" id="recent"></div>
+    </div>
+  </nav>
+
+  <section class="canvas-area">
+    <div class="tabbar" id="tabbar"></div>
+    <div class="scroller" id="scroller">
+      <div class="stack" id="stack">
+        <canvas id="view" width="585" height="559"></canvas>
+      </div>
+    </div>
+    <canvas id="overlay"></canvas>
+    <div class="zoom-dock" id="zoomDock"></div>
+    <div class="zoombar">
+      <button class="mini" id="zoomOut" title="Zoom out (-)">−</button>
+      <span id="zoomVal">100%</span>
+      <button class="mini" id="zoomIn" title="Zoom in (+)">+</button>
+      <button class="mini" id="zoomFit" title="Fit to window (0)">Fit</button>
+      <button class="mini" id="zoom100" title="Actual size (1)">1:1</button>
+    </div>
+  </section>
+
+  <aside class="side" id="side">
+    <section class="panel previewPanel" id="previewPanel">
+      <header class="panel-head"><span class="ph-title">Preview</span><span class="ph-btns"><button class="ph-btn" data-collapse title="Collapse">-</button><button class="ph-btn" data-close title="Close">×</button></span></header>
+      <div class="panel-body">
+        <div class="preview" id="preview"></div>
+        <div class="preview-controls">
+          <label title="Skin colour"><input type="color" id="skinCol" value="#f5cd9b"> Skin</label>
+          <label><input type="checkbox" id="showShirt" checked> Shirt</label>
+          <label><input type="checkbox" id="showPants" checked> Pants</label>
+          <label><input type="checkbox" id="autoRot"> Spin</label>
+          <button class="ph-icon" id="btnShot" title="Save the preview as a PNG"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
+        </div>
+      </div>
+    </section>
+    <section class="panel layersPanel" id="layersPanel">
+      <header class="panel-head"><span class="ph-title">Layers</span><span class="ph-btns"><button class="ph-btn" data-collapse title="Collapse">-</button><button class="ph-btn" data-close title="Close">×</button></span></header>
+      <div class="panel-body">
+        <div class="layer-props">
+          <label>Opacity <input type="range" id="lyOpacity" min="0" max="100" value="100"><span id="lyOpacityVal">100%</span></label>
+          <select id="lyBlend" title="Blend mode">
+            <option value="source-over">Normal</option><option value="multiply">Multiply</option><option value="screen">Screen</option>
+            <option value="overlay">Overlay</option><option value="darken">Darken</option><option value="lighten">Lighten</option>
+            <option value="color-dodge">Colour dodge</option><option value="color-burn">Colour burn</option><option value="hard-light">Hard light</option>
+            <option value="soft-light">Soft light</option><option value="difference">Difference</option><option value="hue">Hue</option>
+            <option value="saturation">Saturation</option><option value="color">Colour</option><option value="luminosity">Luminosity</option><option value="exclusion">Exclusion</option><option value="destination-out">Erase (cut out)</option><option value="destination-in">Mask</option><option value="source-atop">Clip to below</option>
+          </select>
+        </div>
+        <div class="layer-list" id="layerList"></div>
+        <div class="layer-foot">
+          <button class="ph-icon" id="lyMenuBtn" title="More layer tools">⋯</button>
+          <span class="grow"></span>
+          <button class="ph-icon" id="lyUp" title="Move layer up"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+          <button class="ph-icon" id="lyDown" title="Move layer down"><svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+          <button class="ph-icon" id="lyMerge" title="Merge down (Ctrl+M)"><svg viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4"/><path d="M5 19h14"/></svg></button>
+          <button class="ph-icon" id="lyAdd" title="New layer (Ctrl+Shift+N)"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg></button>
+          <button class="ph-icon" id="lyDup" title="Duplicate layer (Ctrl+J)"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="M14 11v6M11 14h6"/></svg></button>
+          <button class="ph-icon" id="lyDel" title="Delete layer (Delete)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+        </div>
+        <div class="layer-menu" id="lyMenu" hidden>
+          <button id="lyAdjust">Adjust colours…</button>
+          <button id="lyFit">Fit to selection</button>
+          <button id="lyClear">Clear (region)</button>
+          <button id="lyMirrorRL">Mirror right → left limb</button>
+          <button id="lyMirrorLR">Mirror left → right limb</button>
+        </div>
+      </div>
+    </section>
+    <section class="panel coloursPanel" id="coloursPanel">
+      <header class="panel-head"><span class="ph-title">Colours</span><span class="ph-btns"><button class="ph-btn" data-collapse title="Collapse">-</button><button class="ph-btn" data-close title="Close">×</button></span></header>
+      <div class="panel-body">
+        <div class="swatch-list" id="swatchList"></div>
+        <div class="layer-foot sw-foot">
+          <button class="mini" id="swFromSel" title="Make a colour fill layer from the current selection">From selection</button>
+          <button class="mini" id="swConvert" title="Turn the selected layer into a colour fill using it as a black &amp; white mask (white = colour, black = hidden)">B&amp;W mask</button>
+          <button class="mini" id="swUnlink" title="Unlink the selected fill layer from its colour">Unlink</button>
+          <span class="grow"></span>
+          <button class="ph-icon" id="swAdd" title="New colour"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg></button>
+        </div>
+      </div>
+    </section>
+    <section class="panel historyPanel" id="historyPanel">
+      <header class="panel-head"><span class="ph-title">History</span><span class="ph-btns"><button class="ph-btn" data-collapse title="Collapse">-</button><button class="ph-btn" data-close title="Close">×</button></span></header>
+      <div class="panel-body">
+        <div class="history-list" id="historyList"></div>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<footer class="status">
+  <span id="stPos">-</span>
+  <span id="stRegion"></span>
+  <span class="grow"></span>
+  <span id="stMsg"></span>
+</footer>
+
+<div class="modal" id="textModal" hidden>
+  <div class="modal-box">
+    <h3>Add text</h3>
+    <textarea id="textInput" rows="2" placeholder="Type your text"></textarea>
+    <div class="modal-actions"><button id="textCancel">Cancel</button><button id="textOk" class="primary">Add</button></div>
+  </div>
+</div>
+
+<div class="modal" id="adjModal" hidden>
+  <div class="modal-box">
+    <h3>Adjust colours</h3>
+    <label>Hue <input type="range" id="adjHue" min="-180" max="180" value="0"><span>0°</span></label>
+    <label>Saturation <input type="range" id="adjSat" min="0" max="300" value="100"><span>100%</span></label>
+    <label>Brightness <input type="range" id="adjBri" min="0" max="200" value="100"><span>100%</span></label>
+    <label>Contrast <input type="range" id="adjCon" min="0" max="200" value="100"><span>100%</span></label>
+    <label><input type="checkbox" id="adjInvert"> Invert</label>
+    <div class="modal-actions"><button id="adjCancel">Cancel</button><button id="adjOk" class="primary">Apply</button></div>
+  </div>
+</div>
+
+<input type="file" id="fileImage" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+<input type="file" id="fileProject" accept=".stitch,.json,.pxz,image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

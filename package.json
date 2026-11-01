@@ -1,0 +1,41 @@
+{
+  "name": "stitch-studio",
+  "productName": "Stitch Editor",
+  "version": "0.3.0",
+  "description": "Stitch Editor - image and template editor with a live 3D character preview",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win portable",
+    "build:mac": "electron-builder --mac dmg",
+    "pack-update": "node tools/pack-update.js"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "com.adjustapen.stitchstudio",
+    "productName": "Stitch Editor",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "build/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "icon": "build/icon.png"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adjustablepen/StitchEditor.git"
+  }
+}
