@@ -1,5 +1,8 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.14.1', notes: [
+    'The Classic (R6) body has been removed from the 3D preview. Woman and Blocky are left. If you had Classic picked, the preview shows Woman.',
+  ] },
   { version: '0.14.0', notes: [
     'New Blocky body in the 3D preview, built from the real Roblox Blocky character: the same rounded blocks, joints and head shape as in game, with the shirt and pants placed exactly where Roblox puts them. Pick it from the Body list in the Preview panel. Woman is still the default.',
     'Blocky replaces the old box version of Blocky. If you had that one picked, you get the new one.',

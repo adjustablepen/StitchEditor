@@ -1,5 +1,5 @@
 // Live 3D character preview - plain WebGL2, no dependencies.
-import { W, H, PARTS, TORSO, FACES } from './template.js';
+import { TORSO } from './template.js';
 import { WOMAN } from './woman-data.js';
 import { BLOCKY } from './blocky-data.js';
 
@@ -43,38 +43,6 @@ void main(){
   o = vec4(mix(c.rgb, c.rgb * d, uLit), c.a);
 }`;
 
-function pushBox(out, center, size, rects) {
-  const [cx, cy, cz] = center, [sx, sy, sz] = size.map(s => s / 2);
-  for (const k of Object.keys(FACES)) {
-    const f = FACES[k];
-    const [x, y, w, h] = rects[k];
-    const u0 = (x + 0.5) / W, u1 = (x + w - 0.5) / W, t0 = (y + 0.5) / H, t1 = (y + h - 0.5) / H;
-    const uv = [[u0, t0], [u1, t0], [u1, t1], [u0, t1]];
-    const p = f.c.map(c => [cx + c[0] * sx, cy + c[1] * sy, cz + c[2] * sz]);
-    for (const i of [0, 3, 2, 0, 2, 1]) out.push(...p[i], ...f.n, ...uv[i]);
-  }
-}
-
-function headGeometry(cy) {
-  const R = 0.62, hh = 0.6, rc = 0.2, seg = 48, prof = [];
-  prof.push([0, -hh, 0, -1]);
-  for (let i = 0; i <= 6; i++) { const a = -Math.PI / 2 + (i / 6) * Math.PI / 2; prof.push([R - rc + rc * Math.cos(a), -hh + rc + rc * Math.sin(a), Math.cos(a), Math.sin(a)]); }
-  for (let i = 0; i <= 6; i++) { const a = (i / 6) * Math.PI / 2; prof.push([R - rc + rc * Math.cos(a), hh - rc + rc * Math.sin(a), Math.cos(a), Math.sin(a)]); }
-  prof.push([0, hh, 0, 1]);
-  const vert = (pi, si) => {
-    const [r, y, nr, ny] = prof[pi];
-    const th = -Math.PI + (si / seg) * Math.PI * 2;
-    const s = Math.sin(th), c = Math.cos(th);
-    return [r * s, cy + y, r * c, nr * s, ny, nr * c, si / seg, (hh - y) / (2 * hh)];
-  };
-  const out = [];
-  for (let p = 0; p < prof.length - 1; p++) for (let s = 0; s < seg; s++) {
-    const a = vert(p, s), b = vert(p, s + 1), c = vert(p + 1, s + 1), d = vert(p + 1, s);
-    out.push(...a, ...b, ...c, ...a, ...c, ...d);
-  }
-  return out;
-}
-
 function discGeometry(r, y) {
   const out = [], seg = 64;
   for (let i = 0; i < seg; i++) {
@@ -83,17 +51,6 @@ function discGeometry(r, y) {
     out.push(0, y, 0, 0, 1, 0, 0.5, 0.5, ...p(a1), ...p(a0));
   }
   return out;
-}
-
-// Classic R6: six boxes
-function buildRig() {
-  const torso = [], arms = [], legs = [];
-  pushBox(torso, [0, 3, 0], [2, 2, 1], PARTS.torso);
-  pushBox(arms, [-1.5, 3, 0], [1, 2, 1], PARTS.right);
-  pushBox(arms, [1.5, 3, 0], [1, 2, 1], PARTS.left);
-  pushBox(legs, [-0.5, 1, 0], [1, 2, 1], PARTS.right);
-  pushBox(legs, [0.5, 1, 0], [1, 2, 1], PARTS.left);
-  return { torso, arms, legs };
 }
 
 // ---- tiny matrix helpers (column-major)
@@ -140,7 +97,6 @@ export function createPreview(container) {
     gl.bindVertexArray(null);
     return { vao, buf, count: data.length / 8 };
   }
-  function freeMesh(m) { if (m) { gl.deleteBuffer(m.buf); gl.deleteVertexArray(m.vao); } }
   function texture() {
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -152,12 +108,10 @@ export function createPreview(container) {
   function upload(t, src) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); gl.generateMipmap(gl.TEXTURE_2D); }
 
   const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
-  const cv = { torso: mk(W, H), arms: mk(W, H), legs: mk(W, H), head: mk(512, 256), ground: mk(256, 256) };
-  const tex = { torso: texture(), arms: texture(), legs: texture(), head: texture(), ground: texture() };
+  const cv = { head: mk(512, 256), ground: mk(256, 256) };
+  const tex = { head: texture(), ground: texture() };
 
-  const opts = { skin: '#f5cd9b', showShirt: true, showPants: true, face: true, autoRotate: false, rig: 'R6' };
-  let meshes = {};
-  const headMesh = mesh(headGeometry(4.6));
+  const opts = { skin: '#f5cd9b', showShirt: true, showPants: true, face: true, autoRotate: false, rig: 'Woman' };
   const groundMesh = mesh(discGeometry(3.4, 0));
 
   // ---- Woman and Blocky bodies: Roblox's own R15 meshes + a per-pixel map of how Roblox composites the template onto
@@ -197,7 +151,7 @@ export function createPreview(container) {
     const b = bodies[type];
     if (!b.mesh) {
       b.raw = new Float32Array(b64(b.data).buffer); b.mesh = mesh(Array.from(b.raw));
-      // the Blocky export's head has no texture: it gets its own mesh, drawn with the box rigs' head texture
+      // the Blocky export's head has no texture: it gets its own mesh, drawn with the head texture below (skin + face)
       if (b.headData) { b.headRaw = new Float32Array(b64(b.headData).buffer); b.head = mesh(Array.from(b.headRaw)); }
     }
     atlas.loading ||= loadAtlas();
@@ -228,11 +182,9 @@ export function createPreview(container) {
   }
 
   function setRig(type) {
-    if (type !== 'R6' && !bodies[type]) type = 'Woman';
+    if (!bodies[type]) type = 'Woman';
     opts.rig = type; dirty = true;
-    if (bodies[type]) loadBody(type);
-    else if (!meshes.torso) { const g = buildRig(); meshes = { torso: mesh(g.torso), arms: mesh(g.arms), legs: mesh(g.legs) }; }
-    update(lastShirt, lastPants);
+    loadBody(type); update(lastShirt, lastPants);
   }
 
   function paintGround() {
@@ -255,12 +207,7 @@ export function createPreview(container) {
   let lastShirt = null, lastPants = null;
   function update(shirt, pants) {
     lastShirt = shirt; lastPants = pants;
-    if (bodies[opts.rig]) { if (atlas.ready) buildAtlas(shirt, pants); dirty = true; return; }
-    const base = (c) => { const g = c.getContext('2d'); g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1; g.fillStyle = opts.skin; g.fillRect(0, 0, W, H); return g; };
-    let g = base(cv.torso); if (opts.showPants && pants) g.drawImage(pants, 0, 0); if (opts.showShirt && shirt) g.drawImage(shirt, 0, 0);
-    g = base(cv.arms); if (opts.showShirt && shirt) g.drawImage(shirt, 0, 0);
-    g = base(cv.legs); if (opts.showPants && pants) g.drawImage(pants, 0, 0);
-    upload(tex.torso, cv.torso); upload(tex.arms, cv.arms); upload(tex.legs, cv.legs);
+    if (atlas.ready) buildAtlas(shirt, pants);
     dirty = true;
   }
 
@@ -301,8 +248,7 @@ export function createPreview(container) {
   // [mesh, texture] pairs to draw
   const bodyList = () => {
     const b = bodies[opts.rig];
-    if (b) return atlas.ready ? [[b.mesh, atlas.tex], ...(b.head ? [[b.head, tex.head]] : [])] : [];
-    return [[meshes.torso, tex.torso], [meshes.arms, tex.arms], [meshes.legs, tex.legs], [headMesh, tex.head]];
+    return atlas.ready ? [[b.mesh, atlas.tex], ...(b.head ? [[b.head, tex.head]] : [])] : [];
   };
   function draw({ keepSize = false, shadow = true } = {}) {
     if (!keepSize) resize();
@@ -324,13 +270,10 @@ export function createPreview(container) {
   // ---- still images (Save preview image): drawn off screen at any size, framed on the body
   function bodyBounds() {
     const b = bodies[opts.rig];
-    if (b?.raw) {
-      if (b.bb) return b.bb;
-      let y0 = Infinity, y1 = -Infinity, r = 0;
-      for (const a of [b.raw, b.headRaw]) if (a) for (let i = 0; i < a.length; i += 8) { y0 = Math.min(y0, a[i + 1]); y1 = Math.max(y1, a[i + 1]); r = Math.max(r, Math.hypot(a[i], a[i + 2])); }
-      return (b.bb = { y0, y1, r });
-    }
-    return { y0: 0, y1: 5.25, r: 2.1 };
+    if (b.bb) return b.bb;
+    let y0 = Infinity, y1 = -Infinity, r = 0;
+    for (const a of [b.raw, b.headRaw]) if (a) for (let i = 0; i < a.length; i += 8) { y0 = Math.min(y0, a[i + 1]); y1 = Math.max(y1, a[i + 1]); r = Math.max(r, Math.hypot(a[i], a[i + 2])); }
+    return (b.bb = { y0, y1, r });
   }
   // view: { theta, phi } to frame the whole body from that side, or null for the camera as it is
   function renderImage({ w, h, view = null, shadow = true, background = null }) {
