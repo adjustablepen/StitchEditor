@@ -546,6 +546,13 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 /* no visible scrollbars anywhere - scrolling still works (wheel, trackpad, drag) */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }
+/* except the canvas: thin bars to get around when zoomed in */
+.scroller { scrollbar-width: auto; }
+.scroller::-webkit-scrollbar { display: block; width: 10px; height: 10px; background: transparent; }
+.scroller::-webkit-scrollbar-thumb { background: rgba(255,255,255,.22); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.scroller::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,.38); }
+.scroller::-webkit-scrollbar-thumb:active { background-color: rgba(255,255,255,.5); }
+.scroller::-webkit-scrollbar-track, .scroller::-webkit-scrollbar-corner { background: transparent; }
 
 .brand .logo { width: 22px; height: 22px; border-radius: 5px; background: none; display: block; }
 

@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.12.0', notes: [
+    'Scroll to zoom: scrolling over the canvas now zooms in and out around your mouse, like Pixlr. No key to hold.',
+    'Scrollbars on the canvas: when you zoom in past the edges, drag the bars to move around. Shift + scroll moves left and right, Alt + scroll moves up and down.',
+  ] },
   { version: '0.11.1', notes: [
     'Body types for the 3D preview: pick Woman, Blocky (R15) or Classic (R6) from the Body list in the Preview panel. Your choice is remembered.',
     'The Blocky (R15) body now splits the arms, legs and torso at the same places Roblox does, so elbows, knees, hands, feet and the waist line up with the game.',

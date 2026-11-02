@@ -145,6 +145,8 @@ let hover = null;
 function drawOverlay() {
   const o = octx, dpr = window.devicePixelRatio || 1;
   // the overlay covers the visible canvas area at screen resolution, so outlines stay 1px sharp at any zoom
+  // ...minus the scrollbars, so outlines and shading never cover them
+  overlay.style.width = scroller.clientWidth + 'px'; overlay.style.height = scroller.clientHeight + 'px';
   const orc = overlay.getBoundingClientRect(), wDev = Math.max(1, Math.round(orc.width * dpr)), hDev = Math.max(1, Math.round(orc.height * dpr));
   if (overlay.width !== wDev || overlay.height !== hDev) { overlay.width = wDev; overlay.height = hDev; }
   o.setTransform(1, 0, 0, 1, 0, 0); o.clearRect(0, 0, overlay.width, overlay.height);
@@ -206,8 +208,16 @@ $('#zoomFit').onclick = zoomFit;
 $('#zoom100').onclick = () => setZoom(1);
 scroller.addEventListener('scroll', () => drawOverlay());
 window.addEventListener('resize', () => requestAnimationFrame(() => drawOverlay()));
+// wheel zooms at the pointer like Pixlr (Ctrl+wheel too, which is also a touchpad pinch). Shift+wheel scrolls sideways,
+// Alt+wheel scrolls up/down, and a sideways touchpad swipe scrolls normally
 scroller.addEventListener('wheel', e => {
-  if (e.ctrlKey || e.metaKey || e.altKey) { e.preventDefault(); setZoom(state.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), { x: e.clientX, y: e.clientY }); }
+  if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+  if (e.shiftKey) { scroller.scrollLeft += dy; return; }
+  if (e.altKey) { scroller.scrollTop += dy; return; }
+  // one mouse notch (100) = 15%; touchpads send small steps and zoom smoothly
+  setZoom(state.zoom * Math.pow(1.15, -Math.max(-300, Math.min(300, dy)) / 100), { x: e.clientX, y: e.clientY });
 }, { passive: false });
 
 // ------------------------------------------------------------------ history
@@ -1224,7 +1234,7 @@ function buildOptions() {
   } else if (t === 'pen') { penOptions(add);
   } else if (t === 'eyedropper') add(el('span', 'ob-hint', 'Click to pick a colour (Alt+click works with most tools)'));
   else if (t === 'hand') add(el('span', 'ob-hint', 'Drag to pan the canvas'));
-  else if (t === 'zoom') add(el('span', 'ob-hint', 'Click to zoom in · Alt+click to zoom out · Ctrl+scroll anywhere'));
+  else if (t === 'zoom') add(el('span', 'ob-hint', 'Click to zoom in · Alt+click to zoom out · Scroll to zoom anywhere'));
 }
 
 function setTool(t) {
@@ -3646,7 +3656,7 @@ const TIPS = {
   ellipse: ['Ellipse', 'Drag to draw an ellipse. Hold Shift for a perfect circle.', 'O'],
   line: ['Line', 'Drag to draw a straight line. Hold Shift to snap to 45° angles.', 'N'],
   text: ['Text', 'Click to add an editable text layer, or click existing text to edit it. Font, fill, format and styles are in the options bar.', 'T'],
-  zoom: ['Zoom', 'Click to zoom in, Alt+click to zoom out. Ctrl+scroll zooms anywhere.', 'Z'],
+  zoom: ['Zoom', 'Click to zoom in, Alt+click to zoom out. Scrolling zooms anywhere.', 'Z'],
 };
 const tipEl = document.createElement('div'); tipEl.className = 'tip'; document.body.appendChild(tipEl);
 let tipTimer = 0;
