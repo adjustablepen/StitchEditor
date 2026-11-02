@@ -1,5 +1,8 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.8.2', notes: [
+    'Layers that use your Colours (colour fills) now always show up when you open a project. Before, they sometimes stayed blank until you changed a colour.',
+  ] },
   { version: '0.8.1', notes: [
     'The select box no longer jumps when you start dragging: the pixel you press on always stays a corner of the box.',
     'Save preview image has a new "3/4 front + back" view: the three-quarter front next to the back, turned the other way.',

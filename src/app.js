@@ -1920,11 +1920,18 @@ function maskCanvas(url) {
   if (maskCache.size > 60) maskCache.delete(maskCache.keys().next().value);
   return c;
 }
+// opening a project: the mask has to be decoded before the fill renders, or the layer stays blank
+// (maskCanvas's own reload only re-renders the open tab, not the project still being built)
+async function loadFillMask(url, w, h) {
+  if (!url || maskCache.get(url)?._ready) return;
+  const img = new Image(); img.src = url; await img.decode();
+  const c = mkCanvas(w, h); c.getContext('2d').drawImage(img, 0, 0); c._ready = true; maskCache.set(url, c);
+}
 function fillPaint(v) { return (v.link && swatchById(v.link)?.paint) || v.paint; }
 function renderFill(l, live) {
-  const v = l.vec, c = l.ctx, m = live || maskCanvas(v.mask);
-  c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, W, H);
-  c.fillStyle = paintStyle(c, fillPaint(v), v.bb || [0, 0, W, H]); c.fillRect(0, 0, W, H);
+  const v = l.vec, c = l.ctx, m = live || maskCanvas(v.mask), w = l.canvas.width, h = l.canvas.height;
+  c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, w, h);
+  c.fillStyle = paintStyle(c, fillPaint(v), v.bb || [0, 0, w, h]); c.fillRect(0, 0, w, h);
   c.globalCompositeOperation = 'destination-in'; c.drawImage(m, 0, 0); c.restore();
 }
 function rerenderFills() { for (const d of Object.values(state.docs)) for (const l of d.layers) if (l.vec?.type === 'fill') renderFill(l); requestRender(); renderSwatches(); }
@@ -2648,7 +2655,7 @@ async function fillDocs(set, data) {
     for (const o of src.layers) {
       const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend });
       const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0);
-      if (o.mask) { const mi = new Image(); mi.src = o.mask; await mi.decode(); l.mask = mkCanvas(set.w, set.h); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(mi, 0, 0); l.maskOff = !!o.maskOff; } if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') renderFill(l); if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
+      if (o.mask) { const mi = new Image(); mi.src = o.mask; await mi.decode(); l.mask = mkCanvas(set.w, set.h); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(mi, 0, 0); l.maskOff = !!o.maskOff; } if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') { await loadFillMask(o.vec.mask, set.w, set.h); renderFill(l); } if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
     }
     if (!d.layers.length) d.layers.push(makeLayer('Layer 1', set.w, set.h));
     d.groups = src.groups || []; normalizeGroups(d);
