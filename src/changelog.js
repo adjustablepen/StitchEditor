@@ -1,5 +1,13 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.11.1', notes: [
+    'Body types for the 3D preview: pick Woman, Blocky (R15) or Classic (R6) from the Body list in the Preview panel. Your choice is remembered.',
+    'The Blocky (R15) body now splits the arms, legs and torso at the same places Roblox does, so elbows, knees, hands, feet and the waist line up with the game.',
+    'Selections are now undo steps: making a selection, Select all, Invert selection and Deselect all show in History and can be undone.',
+    'Changing a shape, line or text setting just before switching between Shirt and Pants no longer drops that change from History.',
+    'Arrow keys nudge a selected shape, line or text with the Shape and Text tools too, not just the Move tool.',
+    'The width box for a line shows its real width instead of 0px.',
+  ] },
   { version: '0.11.0', notes: [
     'Tidier menus: related commands are grouped into submenus that open beside them, such as Layer → Mask, Merge, Flip and Symmetrize, Canvas → Rotate and Flip, and File → Export.',
     'Long menus stop at half the window and scroll, so they never run off the screen.',

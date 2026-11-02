@@ -90,8 +90,10 @@ function discGeometry(r, y) {
 
 function buildRig(type) {
   const torso = [], arms = [], legs = [];
-  const segs = type === 'R15' ? [[0, 0.45], [0.45, 0.85], [0.85, 1]] : [[0, 1]];
-  const tsegs = type === 'R15' ? [[0, 0.6], [0.6, 1]] : [[0, 1]];
+  // R15 splits at the same template rows Roblox uses (read from the Woman remap): upper/lower limb at row 62 of 128,
+  // limb/hand-or-foot at 112, upper/lower torso at 95
+  const segs = type === 'R15' ? [[0, 62 / 128], [62 / 128, 112 / 128], [112 / 128, 1]] : [[0, 1]];
+  const tsegs = type === 'R15' ? [[0, 95 / 128], [95 / 128, 1]] : [[0, 1]];
   const gap = type === 'R15' ? 0.02 : 0;
   const limb = (out, cx, top, rects) => {
     for (const [a, b] of segs) {

@@ -243,6 +243,7 @@ function applyEntry(e, key) {
   else if (e.t === 'sw') { const s = swatchById(e.id); if (s) { s.paint = clone(e[key]); rerenderFills(); } }
   else if (e.t === 'swo') { const ids = e[key]; state.swatches.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); renderSwatches(); scheduleAutosave(); }
   else if (e.t === 'prop') { const l = doc().layers.find(x => x.id === e.id); if (l) l[e.key] = e[key]; }
+  else if (e.t === 'sel') { selX.clearRect(0, 0, W, H); selX.putImageData(e[key], 0, 0); selectionChanged(false); }
   else if (e.t === 'sz') { setProjectSize(e[key].w, e[key].h); restoreStruct(e[key].struct); }
   else restoreStruct(e[key]);
 }
@@ -424,11 +425,17 @@ const brushOf = () => state.tool === 'eraser' ? state.eraser : state.brush;
 const selC = mkCanvas(), selX = ctxOf(selC);
 let hasSel = false, selPath = null, antsOffset = 0, antsTimer = 0, selPreview = null;
 function selAlpha() { return hasSel ? selX.getImageData(0, 0, W, H).data : null; }
-function selectionChanged() {
-  const a = selX.getImageData(0, 0, W, H).data; let any = false;
+// selection changes are undo steps (like Photoshop/Pixlr); record = false for ones the app makes itself (undo, switching projects)
+let selSnap = null; // the selection as of the last change, the 'before' of the next step
+const SEL_LABELS = { select: 'Rectangle select', lasso: 'Lasso select', wand: 'Magic select' };
+function selectionChanged(record = true) {
+  const img = selX.getImageData(0, 0, W, H), a = img.data; let any = false;
   const m = new Uint8Array(W * H); for (let p = 0, i = 3; p < m.length; p++, i += 4) if (a[i] >= 128) { m[p] = 1; any = true; }
   hasSel = any;
-  if (!any) { selPath = null; selX.clearRect(0, 0, W, H); }
+  if (!any) { selPath = null; selX.clearRect(0, 0, W, H); for (let i = 3; i < a.length; i += 4) a[i - 3] = a[i - 2] = a[i - 1] = a[i] = 0; }
+  const before = selSnap && selSnap.width === W && selSnap.height === H ? selSnap : new ImageData(W, H);
+  selSnap = img;
+  if (record && !sameSel(before.data, a)) pushHistory({ t: 'sel', before, after: img, label: any ? histLabel || SEL_LABELS[state.tool] || 'Select' : 'Deselect' });
   else {
     const path = new Path2D();
     for (let y = 0; y <= H; y++) { let run = -1; for (let x = 0; x <= W; x++) { const a1 = y > 0 && x < W ? m[(y - 1) * W + x] : 0, b1 = y < H && x < W ? m[y * W + x] : 0, edge = x < W && a1 !== b1; if (edge && run < 0) run = x; if (!edge && run >= 0) { path.moveTo(run, y); path.lineTo(x, y); run = -1; } } }
@@ -439,6 +446,7 @@ function selectionChanged() {
   if (hasSel) antsTimer = setInterval(() => { antsOffset = (antsOffset + 1) % 8; drawOverlay(); }, 110);
   drawOverlay();
 }
+function sameSel(a, b) { for (let i = 3; i < a.length; i += 4) if ((a[i] >= 128) !== (b[i] >= 128) || a[i] !== b[i]) return false; return true; }
 function applySelection(draw, mode, feather, aa) {
   let t = mkCanvas(); const tc = t.getContext('2d'); tc.fillStyle = '#fff'; tc.strokeStyle = '#fff'; draw(tc);
   if (!aa) { const id = tc.getImageData(0, 0, W, H), d = id.data; for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0; tc.putImageData(id, 0, 0); }
@@ -450,10 +458,10 @@ function applySelection(draw, mode, feather, aa) {
   selX.restore();
   selectionChanged();
 }
-function deselect() { selX.clearRect(0, 0, W, H); selectionChanged(); }
-function selectAll() { selX.fillStyle = '#fff'; selX.fillRect(0, 0, W, H); selectionChanged(); }
-function invertSelection() { const t = mkCanvas(), tc = t.getContext('2d'); tc.fillStyle = '#fff'; tc.fillRect(0, 0, W, H); tc.globalCompositeOperation = 'destination-out'; tc.drawImage(selC, 0, 0); selX.clearRect(0, 0, W, H); selX.drawImage(t, 0, 0); selectionChanged(); }
-function selectRegion() { const r = currentRegion(); applySelection(c => { for (const rc of r.rects) c.fillRect(...rc); }, 'new', 0, false); }
+function deselect(record = true) { selX.clearRect(0, 0, W, H); selectionChanged(record); }
+function selectAll() { selX.fillStyle = '#fff'; selX.fillRect(0, 0, W, H); labelled('Select all', () => selectionChanged()); }
+function invertSelection() { const t = mkCanvas(), tc = t.getContext('2d'); tc.fillStyle = '#fff'; tc.fillRect(0, 0, W, H); tc.globalCompositeOperation = 'destination-out'; tc.drawImage(selC, 0, 0); selX.clearRect(0, 0, W, H); selX.drawImage(t, 0, 0); labelled('Invert selection', () => selectionChanged()); }
+function selectRegion() { const r = currentRegion(); labelled('Select region', () => applySelection(c => { for (const rc of r.rects) c.fillRect(...rc); }, 'new', 0, false)); }
 // combined 0..255 weights of "Paint only in" region and selection, or null if everything is editable
 function combinedWeights() {
   const rm = regionMask(), sa = selAlpha(); if (!rm && !sa) return null;
@@ -1630,11 +1638,11 @@ function shapeOptions(add) {
   const S = state.shape, L = () => activeVec('shape');
   const edit = (fn, label) => { fn(S); const l = L(); if (l && S.mode === 'design') vecEdit(l, fn, label); };
   add(obLabel('Mode:'), obSeg([{ v: 'design', text: 'Design' }, { v: 'draw', text: 'Draw' }], () => S.mode, v => { S.mode = v; }));
-  add(obLabel('Type:'), obSeg(Object.keys(SHAPE_ICONS).map(k => ({ v: k, icon: SHAPE_ICONS[k], title: ({ rect: 'Rectangle', round: 'Rounded rectangle', ellipse: 'Ellipse', line: 'Line', star: 'Star / polygon' })[k] })), () => (L()?.vec.shape) || S.shape, v => { edit(s => { s.shape = v; }, 'Shape type'); buildOptions(); }));
+  add(obLabel('Type:'), obSeg(Object.keys(SHAPE_ICONS).map(k => ({ v: k, icon: SHAPE_ICONS[k], title: ({ rect: 'Rectangle', round: 'Rounded rectangle', ellipse: 'Ellipse', line: 'Line', star: 'Star / polygon' })[k] })), () => (L()?.vec.shape) || S.shape, v => { edit(s => { s.shape = v; if (v === 'line' && !s.strokeW) s.strokeW = 4; }, 'Shape type'); buildOptions(); }));
   const cur = L()?.vec || S;
   add(obLabel('Fill:'), paintSwatch(() => (L()?.vec || S).fill, (p, done, cancel) => { edit(s => { s.fill = clone(p); }, 'Shape fill'); }, { title: 'Fill' }));
   if (cur.shape !== 'line') add(obLabel('Stroke:'), paintSwatch(() => (L()?.vec || S).stroke, (p) => edit(s => { s.stroke = clone(p); }, 'Shape stroke'), { title: 'Stroke' }));
-  add(obNum(() => (L()?.vec || S).strokeW, v => edit(s => { s.strokeW = v; }, cur.shape === 'line' ? 'Line width' : 'Stroke width'), { min: cur.shape === 'line' ? 1 : 0, max: 100, suffix: 'px' }));
+  add(obNum(() => (L()?.vec || S).strokeW || (cur.shape === 'line' ? 4 : 0), v => edit(s => { s.strokeW = v; }, cur.shape === 'line' ? 'Line width' : 'Stroke width'), { min: cur.shape === 'line' ? 1 : 0, max: 100, suffix: 'px' }));
   if (cur.shape === 'round') add(obLabel('Radius:'), obNum(() => (L()?.vec || S).radius, v => edit(s => { s.radius = v; }, 'Corner radius'), { min: 0, max: 300 }));
   if (cur.shape === 'star') add(obLabel('Points:'), obNum(() => (L()?.vec || S).points, v => edit(s => { s.points = Math.max(3, v); }, 'Star points'), { min: 3, max: 40 }), obLabel('Inner:'), obNum(() => (L()?.vec || S).inner, v => edit(s => { s.inner = v; }, 'Star inner size'), { min: 5, max: 100, suffix: '%' }));
   if (L()) add(el('span', 'ob-gap'), obBtn(ICONS.dup, 'Duplicate layer', () => $('#lyDup').click()), obBtn(ICONS.del, 'Delete layer', () => $('#lyDel').click()));
@@ -2599,6 +2607,7 @@ $('#adjCancel').onclick = () => { $('#adjModal').hidden = true; if (adjOp) { res
 
 // ------------------------------------------------------------------ mode tabs & preview controls
 function setMode(m) {
+  if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); // pending edits belong to the part being left
   cancelOp(); state.mode = m; document.body.classList.toggle('canvas-mode', m === 'canvas');
   $('#btnExport').title = m === 'canvas' ? 'Export the canvas as a PNG (Ctrl+E)' : 'Export the current template as a 585×559 PNG (Ctrl+E)';
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
@@ -2615,7 +2624,13 @@ function setPair(v) {
 }
 $('#btnPair').onclick = () => setPair(!pairPref);
 document.body.classList.toggle('pair-view', pairPref); $('#btnPair').classList.toggle('on', pairPref);
-$$('#rigSeg button').forEach(b => b.onclick = () => { $$('#rigSeg button').forEach(x => x.classList.toggle('on', x === b)); preview?.setRig(b.dataset.rig); });
+// body type for the preview, remembered between launches
+{
+  let rig = 'Woman'; try { rig = localStorage.getItem('stitch-rig') || rig; } catch { /* storage unavailable */ }
+  if (![...$('#rigSel').options].some(o => o.value === rig)) rig = 'Woman';
+  $('#rigSel').value = rig; if (rig !== 'Woman') preview?.setRig(rig);
+  $('#rigSel').onchange = () => { const v = $('#rigSel').value; preview?.setRig(v); try { localStorage.setItem('stitch-rig', v); } catch { /* storage unavailable */ } };
+}
 $('#skinCol').oninput = () => preview?.setSkin($('#skinCol').value);
 const syncShow = () => preview?.setShow($('#showShirt').checked, $('#showPants').checked);
 $('#showShirt').onchange = syncShow; $('#showPants').onchange = syncShow;
@@ -2952,7 +2967,9 @@ document.addEventListener('keydown', e => {
     if (k === 'enter' && penDraw) { finishPath(); return; }
     if (k === 'enter' && lasso) { finishLasso(); return; }
     if (k === 'escape') { if (penDraw) finishPath(); else if (lasso) { lasso = null; selPreview = null; drawOverlay(); } else if (op) cancelOp(); else if (hasSel) deselect(); return; }
-    if (state.tool === 'move' && k.startsWith('arrow') && !(e.ctrlKey || e.metaKey)) {
+    // arrows nudge with Move, and with Shape/Text when they have their layer grabbed
+    const nudges = state.tool === 'move' || (state.tool === 'shape' && state.shape.mode === 'design' && activeVec('shape')) || (state.tool === 'text' && activeVec('text'));
+    if (nudges && k.startsWith('arrow') && !(e.ctrlKey || e.metaKey)) {
       e.preventDefault(); const s = e.shiftKey ? 10 : 1;
       nudge(k === 'arrowleft' ? -s : k === 'arrowright' ? s : 0, k === 'arrowup' ? -s : k === 'arrowdown' ? s : 0); return;
     }
@@ -3329,7 +3346,7 @@ function anchorGrid(initial = 4) {
 function setProjectSize(w, h) {
   const st = state.sets[state.setIdx]; st.w = w; st.h = h;
   for (const d of Object.values(st.docs)) d.comp = mkCanvas(w, h);
-  applySize(w, h); if (hasSel) deselect(); // resizing the selection canvas empties it
+  applySize(w, h); if (hasSel) deselect(false); // resizing the selection canvas empties it
   requestAnimationFrame(zoomFit);
 }
 // kind 'image' scales everything to nw x nh; 'canvas' adds/trims space around it, keeping the anchor (0-8, like anchorGrid) in place
@@ -3931,7 +3948,7 @@ function renderTabs() {
   const add = el('button', 'stab-add', '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'); add.title = 'New project (Ctrl+N)'; add.onclick = () => openNewProjectDialog();
   bar.append(add);
 }
-function leaveCurrent() { if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp(); if (hasSel) deselect(); lasso = null; selPreview = null; arr = null; closePop(); stashSet(); }
+function leaveCurrent() { if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp(); if (hasSel) deselect(false); lasso = null; selPreview = null; arr = null; closePop(); stashSet(); }
 function switchSet(i) {
   leaveCurrent(); state.setIdx = i; const st = state.sets[i];
   state.docs = st.docs; state.swatches = st.swatches; arr = null;
