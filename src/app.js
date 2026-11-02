@@ -76,7 +76,6 @@ function mirrorXf(x, y) {
   const { from: [fx, fy], to: [tx, ty, tw] } = MIRROR_FACES[i];
   return (q) => ({ x: tx + tw - (q.x - fx), y: ty + (q.y - fy) });
 }
-const mirrorPt = (q) => { const f = mirrorXf(q.x, q.y); return f && { ...f(q), pr: q.pr }; };
 const mirroring = () => !!(op && (op.maskOf || op.real || op.l))?.mirror; // the layer being painted has Mirror on
 // a path's twin on the other side (null if none of its points are on a face)
 function mirrorSub(sp) {
@@ -446,7 +445,7 @@ function selectionChanged(record = true) {
   const before = selSnap && selSnap.width === W && selSnap.height === H ? selSnap : new ImageData(W, H);
   selSnap = img;
   if (record && !sameSel(before.data, a)) pushHistory({ t: 'sel', before, after: img, label: any ? histLabel || SEL_LABELS[state.tool] || 'Select' : 'Deselect' });
-  else {
+  if (any) {
     const path = new Path2D();
     for (let y = 0; y <= H; y++) { let run = -1; for (let x = 0; x <= W; x++) { const a1 = y > 0 && x < W ? m[(y - 1) * W + x] : 0, b1 = y < H && x < W ? m[y * W + x] : 0, edge = x < W && a1 !== b1; if (edge && run < 0) run = x; if (!edge && run >= 0) { path.moveTo(run, y); path.lineTo(x, y); run = -1; } } }
     for (let x = 0; x <= W; x++) { let run = -1; for (let y = 0; y <= H; y++) { const a1 = x > 0 && y < H ? m[y * W + x - 1] : 0, b1 = x < W && y < H ? m[y * W + x] : 0, edge = y < H && a1 !== b1; if (edge && run < 0) run = y; if (!edge && run >= 0) { path.moveTo(x, run); path.lineTo(x, y); run = -1; } } }
@@ -495,21 +494,55 @@ function clearSelectedPixels() {
   const s = mkCanvas(); s.getContext('2d').drawImage(selC, 0, 0);
   compositeOnto(o, s, { erase: true }); labelled('Delete selection', () => commitOp(o));
 }
-// clipboard (selection-aware)
+// clipboard: with a pixel selection, Ctrl+C copies those pixels; without one, the selected layers themselves (text,
+// shapes and paths stay editable). It is kept in the app, so it pastes into any tab, shirt/pants or project.
+// The system clipboard gets a marker text, so an older image on it doesn't win over what was copied here.
 let clip = null;
-function copySel(cut) {
-  const l = activeLayer(), c = mkCanvas(), x = c.getContext('2d'); x.drawImage(l.canvas, 0, 0);
-  if (hasSel) { x.globalCompositeOperation = 'destination-in'; x.drawImage(selC, 0, 0); }
-  clip = c; toast(hasSel ? 'Copied selection' : 'Copied layer');
-  if (cut) { if (hasSel) clearSelectedPixels(); else labelled('Cut', () => { const o = beginOp(); if (o) { o.l.ctx.clearRect(0, 0, W, H); commitOp(o); } }); }
+const CLIP_MARK = 'stitch-editor-layers';
+function snapLayer(l) {
+  const c = mkCanvas(); c.getContext('2d').drawImage(l.canvas, 0, 0);
+  const m = l.mask ? (() => { const k = mkCanvas(); k.getContext('2d').drawImage(l.mask, 0, 0); return k; })() : null;
+  return { name: l.name, kind: l.kind, opacity: l.opacity, blend: l.blend, visible: l.visible, mirror: !!l.mirror, vec: clone(l.vec), canvas: c, mask: m, maskOff: !!l.maskOff };
 }
-function pasteCanvas(c, name = 'Pasted') { structOp(() => { const l = addLayer(name); l.kind = 'Image'; l.ctx.drawImage(c, 0, 0); }, 'Paste'); setTool('move'); }
+function copySel(cut) {
+  if (hasSel) {
+    const l = activeLayer(), c = mkCanvas(), x = c.getContext('2d'); x.drawImage(l.canvas, 0, 0);
+    x.globalCompositeOperation = 'destination-in'; x.drawImage(selC, 0, 0);
+    clip = { w: W, h: H, layers: [{ name: 'Pasted', kind: 'Image', opacity: 1, blend: 'source-over', visible: true, mirror: false, vec: null, canvas: c, mask: null, maskOff: false }] };
+  } else {
+    const ids = new Set(selectedIds());
+    clip = { w: W, h: H, layers: doc().layers.filter(l => ids.has(l.id)).map(snapLayer) };
+  }
+  navigator.clipboard.writeText(CLIP_MARK).catch(() => {});
+  const n = clip.layers.length;
+  toast(hasSel ? (cut ? 'Cut selection' : 'Copied selection') : `${cut ? 'Cut' : 'Copied'} ${n > 1 ? n + ' layers' : 'layer'} - Ctrl+V pastes it into any tab`);
+  if (cut) { if (hasSel) clearSelectedPixels(); else labelled('Cut', () => $('#lyDel').click()); }
+}
+// pasted above the active layer; from a project of another size it lands centred
+function pasteClip(cb) {
+  const dx = Math.round((W - cb.w) / 2), dy = Math.round((H - cb.h) / 2), same = !dx && !dy && cb.w === W && cb.h === H;
+  structOp(() => {
+    const d = doc(), a = activeLayer(), group = !d.noSel ? a?.group || null : null, made = cb.layers.map(s => {
+      const l = makeLayer(s.name); Object.assign(l, { kind: s.kind, opacity: s.opacity, blend: s.blend, visible: s.visible, mirror: s.mirror, group });
+      l.ctx.drawImage(s.canvas, dx, dy);
+      if (s.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(s.mask, dx, dy); l.maskOff = s.maskOff; }
+      if (s.vec && (same || s.vec.type !== 'fill')) { l.vec = clone(s.vec); if (!same) { shiftVec(l.vec, dx, dy); renderVec(l); } }
+      else if (s.vec) l.kind = 'Image'; // a colour fill's mask is the other project's size: it comes over as pixels
+      return l;
+    });
+    d.layers.splice(d.layers.indexOf(a) + 1, 0, ...made);
+    d.activeId = made[made.length - 1].id; d.activeGroup = null; d.noSel = false; d.sel = new Set(made.map(l => l.id));
+  }, 'Paste');
+  setTool('move');
+}
+function pasteCanvas(c, name = 'Pasted') { pasteClip({ w: W, h: H, layers: [{ name, kind: 'Image', opacity: 1, blend: 'source-over', visible: true, mirror: false, vec: null, canvas: c, mask: null, maskOff: false }] }); }
 document.addEventListener('paste', async (e) => {
   if (e.target.matches?.('input, textarea')) return;
   if (homeOpen()) { const f = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'))?.getAsFile(); if (f) { e.preventDefault(); newProjectFromImages([f]); } return; }
-  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  const ours = clip && e.clipboardData?.getData('text/plain') === CLIP_MARK;
+  const item = !ours && [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
   if (item) { e.preventDefault(); const img = new Image(); img.src = URL.createObjectURL(item.getAsFile()); await img.decode(); const c = mkCanvas(); c.getContext('2d').drawImage(img, img.width === W && img.height === H ? 0 : Math.round((W - Math.min(W, img.width)) / 2), img.width === W && img.height === H ? 0 : Math.round((H - Math.min(H, img.height)) / 2), Math.min(W, img.width), Math.min(H, img.height)); pasteCanvas(c, 'Pasted image'); return; }
-  if (clip) { e.preventDefault(); pasteCanvas(clip); }
+  if (clip) { e.preventDefault(); pasteClip(clip); }
 });
 
 let modeOverride = null;
@@ -643,7 +676,6 @@ function mirrorPoints(p) {
     if (m === 'h' || m === 'both') out.push({ x: 2 * cx - p.x, y: p.y, pr: p.pr });
     if (m === 'v' || m === 'both') out.push({ x: p.x, y: 2 * cy - p.y, pr: p.pr }); if (m === 'both') out.push({ x: 2 * cx - p.x, y: 2 * cy - p.y, pr: p.pr });
   }
-  if (mirroring()) return out.flatMap(q => { const r = mirrorPt(q); return r ? [q, r] : [q]; });
   return out;
 }
 function stampAt(p) {
@@ -680,7 +712,19 @@ function strokeTo(p) {
   while (t <= dist) { const k = dist ? t / dist : 0; stampAt({ x: last.x + dx * k, y: last.y + dy * k, pr: last.pr != null ? last.pr + (p.pr - last.pr) * k : p.pr }); t += spacing; }
   op.carry = t - dist; op.last = p;
 }
-function applyBrush() { compositeOnto(op, strokeC, { erase: state.tool === 'eraser', alpha: brushOf().opacity / 100 }); }
+// Mirror on: the stroke plus each face of it flipped onto its partner face (a normal canvas flips as a whole). Copying the
+// finished stroke picture keeps both sides identical, whatever the brush does (scatter, angled tips, hard-edge rounding)
+const mirC = mkCanvas(), mirX = mirC.getContext('2d');
+function withMirror(src) {
+  if (!mirroring()) return src;
+  if (mirC.width !== W || mirC.height !== H) { mirC.width = W; mirC.height = H; }
+  mirX.clearRect(0, 0, W, H); mirX.drawImage(src, 0, 0);
+  const flip = (sx, sy, sw, sh, dx, dy) => { mirX.save(); mirX.translate(dx + sw, dy); mirX.scale(-1, 1); mirX.drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh); mirX.restore(); };
+  if (!isTemplate()) flip(0, 0, W, H, 0, 0);
+  else for (const { from: [fx, fy, fw, fh], to: [tx, ty] } of MIRROR_FACES) flip(fx, fy, fw, fh, tx, ty);
+  return mirC;
+}
+function applyBrush() { compositeOnto(op, withMirror(strokeC), { erase: state.tool === 'eraser', alpha: brushOf().opacity / 100 }); }
 // putting the stroke onto the layer touches the whole canvas, so do it at most once per frame (stamping stays per event)
 function compositeSoon(fn) {
   if (!op) return; op.pendingComp = fn;
@@ -742,15 +786,9 @@ function pencilSeg(a, b) {
   let err = dx + dy;
   for (;;) { sctx.fillRect(x0 - o, y0 - o, s, s); if (x0 === x1 && y0 === y1) break; const e2 = 2 * err; if (e2 >= dy) { err += dy; x0 += sx; } if (e2 <= dx) { err += dx; y0 += sy; } }
 }
-// the same pencil line on the other side of a mirrored layer (mirrored by pixel centre, so it lands on whole pixels)
-function pencilMirrorSeg(a, b) {
-  const c = (q) => mirrorPt({ x: Math.floor(q.x) + .5, y: Math.floor(q.y) + .5 }), mb = c(b); if (!mb) return;
-  const ma = isTemplate() && faceAt(a.x, a.y) !== faceAt(b.x, b.y) ? null : c(a); // across a face edge the two ends land apart
-  pencilSeg(ma || mb, mb);
-}
 const pencilTool = {
-  down(p, e) { op = beginOp(); if (!op) return; addRecent(state.fg); sctx.clearRect(0, 0, W, H); const s = e.shiftKey && lastPoint ? lastPoint : p; pencilSeg(s, p); if (mirroring()) pencilMirrorSeg(s, p); op.last = p; compositeOnto(op, strokeC, { alpha: state.opacity }); },
-  move(p) { if (!op) return; pencilSeg(op.last, p); if (mirroring()) pencilMirrorSeg(op.last, p); op.last = p; compositeSoon(() => compositeOnto(op, strokeC, { alpha: state.opacity })); },
+  down(p, e) { op = beginOp(); if (!op) return; addRecent(state.fg); sctx.clearRect(0, 0, W, H); const s = e.shiftKey && lastPoint ? lastPoint : p; pencilSeg(s, p); op.last = p; compositeOnto(op, withMirror(strokeC), { alpha: state.opacity }); },
+  move(p) { if (!op) return; pencilSeg(op.last, p); op.last = p; compositeSoon(() => compositeOnto(op, withMirror(strokeC), { alpha: state.opacity })); },
   up() { if (!op) return; flushComposite(op); lastPoint = op.last; commitOp(op); op = null; },
 };
 
@@ -2123,11 +2161,28 @@ function penHit(l, p) {
   return null;
 }
 const curSub = () => penDraw ? penDraw.l.vec.paths[penDraw.s] : null;
+// a path's mirror twin on a layer with Mirror on (index, or -1). Twins share a `tw` id; twins from before 0.12.1 have
+// none and are found by shape (call this before editing, while the two still match)
+function twinOf(l, s) {
+  if (!l.mirror) return -1;
+  const S = l.vec.paths, sp = S[s]; if (!sp) return -1;
+  if (sp.tw) return S.findIndex((o, j) => j !== s && o.tw === sp.tw);
+  const m = mirrorSub(sp); if (!m) return -1;
+  const near = (a, b) => (!a && !b) || (a && b && Math.abs(a.x - b.x) < .01 && Math.abs(a.y - b.y) < .01);
+  const j = S.findIndex((o, j) => j !== s && !o.tw && o.pts.length === m.pts.length && o.pts.every((q, i) => near(q, m.pts[i]) && near(q.hin, m.pts[i].hin) && near(q.hout, m.pts[i].hout)));
+  if (j >= 0) sp.tw = S[j].tw = Math.random().toString(36).slice(2, 10);
+  return j;
+}
+// redraw path j as the mirror of path s after s was edited
+function syncTwin(l, s, j) {
+  if (j < 0) return; const S = l.vec.paths, m = mirrorSub(S[s]);
+  if (m) { S[j].pts = m.pts; S[j].closed = S[s].closed; }
+}
 function finishPath() {
   const pd = penDraw; if (!pd) return; penDraw = null; penHover = null;
   const sp = pd.l.vec.paths[pd.s];
   if (!sp || sp.pts.length < 2) { restoreStruct(pd.struct); rebuildLayers(); requestRender(); drawOverlay(); buildOptions(); return; }
-  if (pd.l.mirror) { const m = mirrorSub(sp); if (m) pd.l.vec.paths.push(m); } // Mirror on: a twin path on the other side, edited on its own
+  if (pd.l.mirror) { const m = mirrorSub(sp); if (m) { sp.tw = m.tw = Math.random().toString(36).slice(2, 10); pd.l.vec.paths.push(m); } } // Mirror on: a twin path on the other side
   renderPath(pd.l); pushHistory({ t: 'st', label: pd.added ? 'Add path' : 'Draw path', before: pd.struct, after: snapStruct() }); penSub = pd.s; penOwner = pd.l.id; penSel = -1; rebuildLayers(); buildOptions(); drawOverlay();
 }
 const penTool = {
@@ -2141,8 +2196,8 @@ const penTool = {
     if (lp) {
       const h = penHit(lp, p);
       if (h) {
-        if (h.k === 'a' && e.altKey) { const o = beginOp({ vec: true }); if (!o) return; const P = lp.vec.paths[h.s].pts, pt = P[h.i]; if (pt.hin || pt.hout) { pt.hin = pt.hout = null; } else { const nx = P[h.i + 1] || P[h.i - 1]; if (nx) { const dx = (nx.x - pt.x) / 3, dy = (nx.y - pt.y) / 3; pt.hout = { x: pt.x + dx, y: pt.y + dy }; pt.hin = { x: pt.x - dx, y: pt.y - dy }; } } renderPath(lp); labelled('Path point type', () => commitOp(o)); penSub = h.s; penOwner = lp.id; penSel = h.i; drawOverlay(); return; }
-        const o = beginOp({ vec: true }); if (!o) return; penSub = h.s; penOwner = lp.id; penSel = h.i; op = { edit: h, o, start: p }; drawOverlay(); buildOptions(); return;
+        if (h.k === 'a' && e.altKey) { const o = beginOp({ vec: true }); if (!o) return; const tw = twinOf(lp, h.s), P = lp.vec.paths[h.s].pts, pt = P[h.i]; if (pt.hin || pt.hout) { pt.hin = pt.hout = null; } else { const nx = P[h.i + 1] || P[h.i - 1]; if (nx) { const dx = (nx.x - pt.x) / 3, dy = (nx.y - pt.y) / 3; pt.hout = { x: pt.x + dx, y: pt.y + dy }; pt.hin = { x: pt.x - dx, y: pt.y - dy }; } } syncTwin(lp, h.s, tw); renderPath(lp); labelled('Path point type', () => commitOp(o)); penSub = h.s; penOwner = lp.id; penSel = h.i; drawOverlay(); return; }
+        const o = beginOp({ vec: true }); if (!o) return; penSub = h.s; penOwner = lp.id; penSel = h.i; op = { edit: h, o, start: p, tw: twinOf(lp, h.s) }; drawOverlay(); buildOptions(); return;
       }
     }
     penSel = -1;
@@ -2170,6 +2225,7 @@ const penTool = {
         const k = op.edit.k, other = k === 'hin' ? 'hout' : 'hin'; pt[k] = { x: p.x, y: p.y };
         if (!e.altKey && pt[other]) { const len = Math.hypot(pt[other].x - pt.x, pt[other].y - pt.y), ang = Math.atan2(pt.y - p.y, pt.x - p.x); pt[other] = { x: pt.x + Math.cos(ang) * len, y: pt.y + Math.sin(ang) * len }; }
       }
+      syncTwin(l, op.edit.s, op.tw);
       renderPath(l); requestRender(); drawOverlay();
     }
   },
@@ -2182,10 +2238,11 @@ const penTool = {
 };
 function deletePenPoint() {
   const lp = activePath(); if (!lp || penSel < 0 || penOwner !== lp.id || !lp.vec.paths[penSub]) return false;
-  const S = lp.vec.paths, sp = S[penSub];
-  if (sp.pts.length <= 2 && S.length <= 1) { $('#lyDel').click(); penSel = penSub = -1; return true; }
+  const S = lp.vec.paths, sp = S[penSub], tw = twinOf(lp, penSub);
+  if (sp.pts.length <= 2 && S.length <= (tw >= 0 ? 2 : 1)) { $('#lyDel').click(); penSel = penSub = -1; return true; }
   const o = beginOp({ vec: true }); if (!o) return true;
-  if (sp.pts.length <= 2) { S.splice(penSub, 1); penSub = -1; } else sp.pts.splice(penSel, 1);
+  if (sp.pts.length <= 2) { for (const j of [penSub, tw].filter(j => j >= 0).sort((a, b) => b - a)) S.splice(j, 1); penSub = -1; }
+  else { sp.pts.splice(penSel, 1); syncTwin(lp, penSub, tw); }
   penSel = -1; renderPath(lp); labelled('Delete path point', () => commitOp(o)); drawOverlay(); return true;
 }
 function drawPenOverlay(o) {
@@ -3560,7 +3617,7 @@ const MENUS = [
     '-',
     { label: 'Copy', key: 'Ctrl+C', run: () => copySel(false) },
     { label: 'Cut', key: 'Ctrl+X', run: () => copySel(true) },
-    { label: 'Paste as new layer', key: 'Ctrl+V', run: () => clip ? pasteCanvas(clip) : toast('Nothing copied yet'), off: () => !clip },
+    { label: 'Paste', key: 'Ctrl+V', run: () => clip ? pasteClip(clip) : toast('Nothing copied yet'), off: () => !clip },
     { label: 'Delete selected pixels', key: 'Del', run: clearSelectedPixels, off: () => !hasSel },
   ] },
   { label: 'Adjustment', items: [

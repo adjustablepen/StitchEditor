@@ -1,5 +1,11 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.13.0', notes: [
+    'Copy and paste layers between tabs: with no pixels selected, Ctrl+C copies the selected layers and Ctrl+V pastes them into any tab, Shirt or Pants or another project. Text, shapes and paths stay editable. With a selection, Ctrl+C still copies just those pixels.',
+    'Fixed: the selection box showed no outline after you dragged it, so it looked like nothing was selected.',
+    'Mirror is now exact: Brush, Pencil and Eraser strokes come out pixel for pixel the same on both sides, including scattered and angled brushes and even pencil sizes.',
+    'Editing a mirrored path with Mirror on now updates its twin on the other side: moving points and handles, changing a point type and deleting points.',
+  ] },
   { version: '0.12.0', notes: [
     'Scroll to zoom: scrolling over the canvas now zooms in and out around your mouse, like Pixlr. No key to hold.',
     'Scrollbars on the canvas: when you zoom in past the edges, drag the bars to move around. Shift + scroll moves left and right, Alt + scroll moves up and down.',
