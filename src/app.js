@@ -2564,7 +2564,13 @@ function openRenderDialog() {
   side.append(row('View'), views, row('Size', sizes), row('Background', bgs, col), shadow);
   const note = el('p', 'render-note'); note.textContent = 'Uses the Skin, Shirt and Pants settings under the preview.'; side.append(note);
   body.append(img, side); refresh();
-  dlg('Save preview image', body, { okLabel: 'Save PNG', onOk: () => {
+  const copy = async () => {
+    try {
+      const blob = await canvasBlob(renderPreview(renderOpts.size), 'image/png');
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('Copied preview image');
+    } catch { toast('Could not copy the image'); }
+  };
+  dlg('Save preview image', body, { okLabel: 'Save PNG', extra: [{ label: 'Copy image', run: copy, keepOpen: true }], onOk: () => {
     const name = fileSafe(state.sets[state.setIdx]?.name) + '-' + renderOpts.view + '.png';
     saveDataUrl(renderPreview(renderOpts.size).toDataURL('image/png'), name, 'PNG image', ['png']);
   } });
@@ -2952,7 +2958,7 @@ function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = '
     foot.append(cmp);
   }
   const sp = document.createElement('span'); sp.style.flex = '1'; foot.append(sp);
-  if (extra) for (const ex of extra) { const b = document.createElement('button'); b.className = 'dlg-link'; b.textContent = ex.label; b.onclick = () => { ex.run(); close(); }; foot.append(b); }
+  if (extra) for (const ex of extra) { const b = document.createElement('button'); b.className = 'dlg-link'; b.textContent = ex.label; b.onclick = () => { ex.run(); if (!ex.keepOpen) close(); }; foot.append(b); }
   const cancel = document.createElement('button'); cancel.className = 'pill ghost'; cancel.textContent = cancelLabel;
   const ok = document.createElement('button'); ok.className = 'pill primary'; ok.textContent = okLabel;
   foot.append(cancel, ok);

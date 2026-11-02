@@ -1,5 +1,8 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.9.0', notes: [
+    'Save preview image has a Copy image button: copy the picture straight to the clipboard and paste it anywhere, no file needed. The window stays open so you can copy another view.',
+  ] },
   { version: '0.8.3', notes: [
     'The "3/4 front + back" preview image now shows the back turned the right way: the same pose as the front, seen from behind.',
   ] },
