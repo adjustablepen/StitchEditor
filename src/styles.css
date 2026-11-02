@@ -815,3 +815,8 @@ body.pair-view #otherView { display: block; }
 .pair-btn.on { color: #fff; background: var(--accent); border-color: var(--accent); }
 /* recent colours in the colour window */
 .fill-label { font-size: 11px; color: var(--muted); margin: 10px 0 5px; }
+/* menus: at most half the window tall (they scroll), and submenus that open beside their entry */
+.mb-drop { max-height: 50vh; overflow-y: auto; overscroll-behavior: contain; }
+.mb-drop.mb-sub { display: flex; flex-direction: column; position: fixed; z-index: 61; min-width: 200px; animation: drop-in .12s var(--ease-out); }
+.mb-entry.has-sub kbd { font-size: 15px; line-height: 1; }
+.mb-entry.sub-open { background: var(--panel2); }

@@ -3447,13 +3447,15 @@ const MENUS = [
     { label: 'Open (.stitch, Pixlr .pxz or image)…', key: 'Ctrl+O', run: () => $('#btnOpen').click() },
     { label: 'Save project (.stitch)…', key: 'Ctrl+S', run: () => $('#btnSave').click() },
     { label: 'Version history…', run: async () => { await saveDirty(); const st = state.sets[state.setIdx], m = (await lib.list()).find(x => x.id === st.id); if (m) openVersions(m); else toast('This project hasn’t been saved yet'); }, off: () => !lib.versions || !!state.sets[state.setIdx]?.temp },
-    { label: 'Export as Pixlr file (.pxz)…', run: exportPxz },
     '-',
     { label: 'Import image as layer…', key: 'Ctrl+I', run: () => $('#btnImport').click() },
     '-',
-    { label: 'Export PNG…', key: 'Ctrl+E', run: () => exportPng() },
-    { label: 'Export set (shirt + pants)…', key: 'Ctrl+Shift+E', run: () => exportSet(), off: () => !isTemplate() },
-    { label: 'Save preview image…', run: () => openRenderDialog(), off: () => !isTemplate() },
+    { label: 'Export', sub: [
+      { label: 'Export PNG…', key: 'Ctrl+E', run: () => exportPng() },
+      { label: 'Export set (shirt + pants)…', key: 'Ctrl+Shift+E', run: () => exportSet(), off: () => !isTemplate() },
+      { label: 'Export as Pixlr file (.pxz)…', run: exportPxz },
+      { label: 'Save preview image…', run: () => openRenderDialog(), off: () => !isTemplate() },
+    ] },
     '-',
     { label: 'Check for updates…', run: () => checkUpdates(true) },
   ] },
@@ -3462,10 +3464,14 @@ const MENUS = [
     { label: 'Canvas size…', run: () => sizeDialog('canvas') },
     { label: 'Smart resize (fit layer to selection)', run: () => $('#lyFit').click() },
     '-',
-    { label: 'Rotate left', run: () => rotateCanvas(-1) },
-    { label: 'Rotate right', run: () => rotateCanvas(1) },
-    { label: 'Flip horizontal', run: () => flipCanvas(true) },
-    { label: 'Flip vertical', run: () => flipCanvas(false) },
+    { label: 'Rotate', sub: [
+      { label: 'Rotate left', run: () => rotateCanvas(-1) },
+      { label: 'Rotate right', run: () => rotateCanvas(1) },
+    ] },
+    { label: 'Flip', sub: [
+      { label: 'Flip horizontal', run: () => flipCanvas(true) },
+      { label: 'Flip vertical', run: () => flipCanvas(false) },
+    ] },
   ] },
   { label: 'Layer', items: [
     { label: 'New layer', key: 'Ctrl+Shift+N', run: () => $('#lyAdd').click() },
@@ -3473,18 +3479,22 @@ const MENUS = [
     { label: 'Add image as layer…', run: () => $('#btnImport').click() },
     { label: 'Rename layer', key: 'F2', run: renameActive },
     { label: 'Delete layer', key: 'Del', run: () => $('#lyDel').click() },
-    { label: 'New colour fill from selection', run: newFillFromSelection, off: () => !hasSel },
-    { label: 'Convert to colour fill (keep shape)', run: () => convertToFill('alpha') },
-    { label: 'Convert to colour fill (black & white mask)', run: () => convertToFill('luma') },
-    { label: 'Change fill colour…', run: () => editFillLayerColour(activeLayer()), off: () => activeLayer().vec?.type !== 'fill' },
     '-',
-    { label: 'Add mask', run: () => addMask(false), off: () => !!activeLayer().mask || !!doc().activeGroup },
-    { label: 'Add mask from selection', run: () => addMask(true), off: () => !hasSel || !!activeLayer().mask || !!doc().activeGroup },
-    { label: 'Edit mask', run: () => editMask(activeLayer()), off: () => !activeLayer().mask || maskEditing(activeLayer()) },
-    { label: 'Invert mask', run: invertMask, off: () => !activeLayer().mask },
-    { label: 'Turn mask off / on', run: () => { const l = activeLayer(); propChange(l, 'maskOff', !l.maskOff, l.maskOff ? 'Enable mask' : 'Disable mask'); }, off: () => !activeLayer().mask },
-    { label: 'Apply mask', run: applyMask, off: () => !activeLayer().mask },
-    { label: 'Delete mask', run: deleteMask, off: () => !activeLayer().mask },
+    { label: 'Colour fill', sub: [
+      { label: 'New colour fill from selection', run: newFillFromSelection, off: () => !hasSel },
+      { label: 'Convert to colour fill (keep shape)', run: () => convertToFill('alpha') },
+      { label: 'Convert to colour fill (black & white mask)', run: () => convertToFill('luma') },
+      { label: 'Change fill colour…', run: () => editFillLayerColour(activeLayer()), off: () => activeLayer().vec?.type !== 'fill' },
+    ] },
+    { label: 'Mask', sub: [
+      { label: 'Add mask', run: () => addMask(false), off: () => !!activeLayer().mask || !!doc().activeGroup },
+      { label: 'Add mask from selection', run: () => addMask(true), off: () => !hasSel || !!activeLayer().mask || !!doc().activeGroup },
+      { label: 'Edit mask', run: () => editMask(activeLayer()), off: () => !activeLayer().mask || maskEditing(activeLayer()) },
+      { label: 'Invert mask', run: invertMask, off: () => !activeLayer().mask },
+      { label: 'Turn mask off / on', run: () => { const l = activeLayer(); propChange(l, 'maskOff', !l.maskOff, l.maskOff ? 'Enable mask' : 'Disable mask'); }, off: () => !activeLayer().mask },
+      { label: 'Apply mask', run: applyMask, off: () => !activeLayer().mask },
+      { label: 'Delete mask', run: deleteMask, off: () => !activeLayer().mask },
+    ] },
     '-',
     { label: 'Group layers', key: 'Ctrl+G', run: groupLayers },
     { label: 'Ungroup', key: 'Ctrl+Shift+G', run: ungroupLayers, off: () => !doc().activeGroup && !activeLayer().group },
@@ -3492,20 +3502,29 @@ const MENUS = [
     { label: 'Mirror on / off', run: () => toggleMirror(), off: () => !!doc().activeGroup },
     { label: 'Rasterize layer', run: () => { const l = activeLayer(); endTextEdit(); flushVecEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); }, off: () => !activeLayer().vec },
     '-',
-    { label: 'Merge down', key: 'Ctrl+M', run: () => $('#lyMerge').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
-    { label: 'Merge visible', key: 'Ctrl+Shift+M', run: mergeVisible },
-    { label: 'Flatten image', run: flatten, off: () => doc().layers.length < 2 },
+    { label: 'Merge', sub: [
+      { label: 'Merge down', key: 'Ctrl+M', run: () => $('#lyMerge').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
+      { label: 'Merge visible', key: 'Ctrl+Shift+M', run: mergeVisible },
+      { label: 'Flatten image', run: flatten, off: () => doc().layers.length < 2 },
+    ] },
+    { label: 'Arrange', sub: [
+      { label: 'Bring forward / up', key: 'Ctrl+]', run: () => $('#lyUp').click(), off: () => doc().layers.indexOf(activeLayer()) === doc().layers.length - 1 },
+      { label: 'Send backward / down', key: 'Ctrl+[', run: () => $('#lyDown').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
+    ] },
     '-',
-    { label: 'Bring forward / up', key: 'Ctrl+]', run: () => $('#lyUp').click(), off: () => doc().layers.indexOf(activeLayer()) === doc().layers.length - 1 },
-    { label: 'Send backward / down', key: 'Ctrl+[', run: () => $('#lyDown').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
-    '-',
-    { label: 'Flip layer horizontal', run: () => flipLayer(true) },
-    { label: 'Flip layer vertical', run: () => flipLayer(false) },
-    { label: 'Symmetrize right → left', cmd: 'symRL', run: () => $('#lySymRL').click() },
-    { label: 'Symmetrize left → right', cmd: 'symLR', run: () => $('#lySymLR').click() },
-    { label: 'Mirror right → left limb', run: () => $('#lyMirrorRL').click(), off: () => !isTemplate() },
-    { label: 'Mirror left → right limb', run: () => $('#lyMirrorLR').click(), off: () => !isTemplate() },
-    { label: 'Clear layer (region)', run: () => $('#lyClear').click() },
+    { label: 'Flip', sub: [
+      { label: 'Flip horizontal', run: () => flipLayer(true) },
+      { label: 'Flip vertical', run: () => flipLayer(false) },
+    ] },
+    { label: 'Symmetrize', sub: [
+      { label: 'Right side → left', cmd: 'symRL', run: () => $('#lySymRL').click(), raster: true },
+      { label: 'Left side → right', cmd: 'symLR', run: () => $('#lySymLR').click(), raster: true },
+    ] },
+    { label: 'Mirror limb', off: () => !isTemplate(), sub: [
+      { label: 'Right → left', run: () => $('#lyMirrorRL').click(), off: () => !isTemplate(), raster: true },
+      { label: 'Left → right', run: () => $('#lyMirrorLR').click(), off: () => !isTemplate(), raster: true },
+    ] },
+    { label: 'Clear layer (region)', run: () => $('#lyClear').click(), raster: true },
   ] },
   { label: 'Select', items: [
     { label: 'Select all', key: 'Ctrl+A', run: selectAll },
@@ -3535,32 +3554,54 @@ const MENUS = [
 const MENU_CMDS = { 'New project…': 'newProject', 'Open (.stitch, Pixlr .pxz or image)…': 'open', 'Save project (.stitch)…': 'save', 'Import image as layer…': 'import', 'Export PNG…': 'exportPng', 'Export set (shirt + pants)…': 'exportSet',
   'New layer': 'newLayer', 'Duplicate layer': 'dup', 'Rename layer': 'rename', 'Delete layer': 'delete', 'Group layers': 'group', 'Ungroup': 'ungroup', 'Lock / unlock layer': 'lock', 'Mirror on / off': 'mirror', 'Merge down': 'merge', 'Merge visible': 'mergeVisible',
   'Bring forward / up': 'layerUp', 'Send backward / down': 'layerDown', 'Select all': 'selectAll', 'Deselect': 'deselect', 'Invert selection': 'invert', 'Copy': 'copy', 'Cut': 'cut', 'Delete selected pixels': 'delete' };
-for (const m of MENUS) for (const it of m.items) if (it !== '-' && MENU_CMDS[it.label]) it.cmd = MENU_CMDS[it.label];
+// every entry, including those in submenus
+const menuEntries = (items) => items.flatMap(it => it === '-' ? [] : [it, ...(it.sub ? menuEntries(it.sub) : [])]);
+for (const m of MENUS) for (const it of menuEntries(m.items)) if (MENU_CMDS[it.label]) it.cmd = MENU_CMDS[it.label];
 
 // menu actions that only work on pixels are greyed out while text, a shape or a colour fill is selected
 const pixelsOnly = () => !doc().noSel && !!activeLayer()?.vec;
-const RASTER_ONLY = ['Clear layer (region)', 'Symmetrize right → left', 'Symmetrize left → right', 'Mirror right → left limb', 'Mirror left → right limb', 'Cut', 'Delete selected pixels'];
-for (const m of MENUS) for (const it of m.items) if (it !== '-' && it.run && (m.label === 'Adjustment' || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
+const RASTER_ONLY = ['Cut', 'Delete selected pixels'];
+for (const m of MENUS) for (const it of menuEntries(m.items)) if (it.run && (m.label === 'Adjustment' || it.raster || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
 const menubar = $('#menubar');
 let openMenu = null;
-function closeMenus() { menubar.querySelectorAll('.mb-item').forEach(m => m.classList.remove('open')); openMenu = null; }
+function closeMenus() { menubar.querySelectorAll('.mb-item').forEach(m => m.classList.remove('open')); closeSubs(0); openMenu = null; }
+// submenus open beside their entry; closeSubs(n) closes the ones deeper than level n
+const subs = [];
+function closeSubs(level) { while (subs.length > level) { const f = subs.pop(); f.entry.classList.remove('sub-open'); f.el.remove(); } }
+function fillMenu(box, items, level) {
+  for (const it of items) {
+    if (it === '-') { const s = document.createElement('div'); s.className = 'mb-sep'; box.append(s); continue; }
+    const b = document.createElement('button'); b.className = 'mb-entry';
+    b.innerHTML = `<span></span><kbd></kbd>`; b.firstChild.textContent = it.label;
+    if (it.sub) {
+      b.lastChild.textContent = '›'; b.classList.add('has-sub');
+      b.disabled = !!it.off?.() || menuEntries(it.sub).every(x => x.sub || !x.run || x.off?.());
+      const open = () => {
+        if (b.disabled || b.classList.contains('sub-open')) return;
+        closeSubs(level); const f = document.createElement('div'); f.className = 'mb-drop mb-sub'; fillMenu(f, it.sub, level + 1); menubar.append(f);
+        // right of the entry, or left of it if that would run off the window; kept inside the window top to bottom
+        const r = b.getBoundingClientRect(), w = f.offsetWidth, h = f.offsetHeight;
+        f.style.left = (r.right + w + 4 > innerWidth ? r.left - w + 2 : r.right - 2) + 'px'; f.style.top = Math.max(4, Math.min(innerHeight - h - 4, r.top - 5)) + 'px';
+        b.classList.add('sub-open'); subs.push({ el: f, entry: b });
+      };
+      b.onmouseenter = open; b.onclick = (e) => { e.stopPropagation(); open(); };
+    } else {
+      b.lastChild.textContent = it.cmd ? keyOf(it.cmd) : it.key || '';
+      b.disabled = !!it.off?.() || !it.run;
+      if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = 'Needs a plain image layer - use Layer → Rasterize layer first';
+      b.onmouseenter = () => closeSubs(level);
+      b.onclick = () => { closeMenus(); it.run?.(); };
+    }
+    box.append(b);
+  }
+}
 for (const m of MENUS) {
   const item = document.createElement('div'); item.className = 'mb-item';
   const btn = document.createElement('button'); btn.className = 'mb-btn'; btn.textContent = m.label;
   const dd = document.createElement('div'); dd.className = 'mb-drop';
   item.append(btn, dd); menubar.append(item);
-  const build = () => {
-    dd.innerHTML = '';
-    for (const it of m.items) {
-      if (it === '-') { const s = document.createElement('div'); s.className = 'mb-sep'; dd.append(s); continue; }
-      const b = document.createElement('button'); b.className = 'mb-entry';
-      b.innerHTML = `<span></span><kbd></kbd>`; b.firstChild.textContent = it.label; b.lastChild.textContent = it.cmd ? keyOf(it.cmd) : it.key || '';
-      b.disabled = !!it.off?.() || !it.run;
-      if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = 'Needs a plain image layer - use Layer → Rasterize layer first';
-      b.onclick = () => { closeMenus(); it.run?.(); };
-      dd.append(b);
-    }
-  };
+  const build = () => { dd.innerHTML = ''; fillMenu(dd, m.items, 0); };
+  dd.addEventListener('scroll', () => closeSubs(0)); // an open submenu would be left behind by the scroll
   btn.onclick = (e) => { e.stopPropagation(); const was = item.classList.contains('open'); closeMenus(); if (!was) { build(); item.classList.add('open'); openMenu = item; } };
   btn.onmouseenter = () => { if (openMenu && openMenu !== item) { closeMenus(); build(); item.classList.add('open'); openMenu = item; } };
 }

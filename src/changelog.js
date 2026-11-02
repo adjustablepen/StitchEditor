@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.11.0', notes: [
+    'Tidier menus: related commands are grouped into submenus that open beside them, such as Layer → Mask, Merge, Flip and Symmetrize, Canvas → Rotate and Flip, and File → Export.',
+    'Long menus stop at half the window and scroll, so they never run off the screen.',
+  ] },
   { version: '0.10.1', notes: [
     'Symmetrize (Layer → Symmetrize right → left / left → right): makes a layer match on both sides by copying one side onto the other, flipped. On templates it copies the arm or leg and that side of the torso, and evens out the front, back, top and bottom. On a normal canvas it copies one half onto the other.',
   ] },
