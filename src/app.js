@@ -2694,6 +2694,7 @@ document.body.classList.toggle('pair-view', pairPref); $('#btnPair').classList.t
 // body type for the preview, remembered between launches
 {
   let rig = 'Woman'; try { rig = localStorage.getItem('stitch-rig') || rig; } catch { /* storage unavailable */ }
+  if (rig === 'R15') rig = 'Blocky'; // 0.11.1-0.13.0 had a box version of Blocky
   if (![...$('#rigSel').options].some(o => o.value === rig)) rig = 'Woman';
   $('#rigSel').value = rig; if (rig !== 'Woman') preview?.setRig(rig);
   $('#rigSel').onchange = () => { const v = $('#rigSel').value; preview?.setRig(v); try { localStorage.setItem('stitch-rig', v); } catch { /* storage unavailable */ } };

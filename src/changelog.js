@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.14.0', notes: [
+    'New Blocky body in the 3D preview, built from the real Roblox Blocky character: the same rounded blocks, joints and head shape as in game, with the shirt and pants placed exactly where Roblox puts them. Pick it from the Body list in the Preview panel. Woman is still the default.',
+    'Blocky replaces the old box version of Blocky. If you had that one picked, you get the new one.',
+  ] },
   { version: '0.13.0', notes: [
     'Copy and paste layers between tabs: with no pixels selected, Ctrl+C copies the selected layers and Ctrl+V pastes them into any tab, Shirt or Pants or another project. Text, shapes and paths stay editable. With a selection, Ctrl+C still copies just those pixels.',
     'Fixed: the selection box showed no outline after you dragged it, so it looked like nothing was selected.',

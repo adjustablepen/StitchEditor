@@ -1,6 +1,7 @@
 // Live 3D character preview - plain WebGL2, no dependencies.
 import { W, H, PARTS, TORSO, FACES } from './template.js';
 import { WOMAN } from './woman-data.js';
+import { BLOCKY } from './blocky-data.js';
 
 const VS = `#version 300 es
 in vec3 aPos; in vec3 aNor; in vec2 aUv;
@@ -8,7 +9,7 @@ uniform mat4 uVP;
 out vec3 vN; out vec2 vUv;
 void main(){ vN = aNor; vUv = aUv; gl_Position = uVP * vec4(aPos, 1.0); }`;
 
-// builds the Woman texture: every atlas pixel either keeps the skin/face base or takes its template pixel
+// builds the Woman/Blocky texture: every atlas pixel either keeps the skin/face base or takes its template pixel
 // (pants first, then shirt over it), using the remap from woman-data.js
 const ATLAS_VS = `#version 300 es
 in vec2 aP;
@@ -42,15 +43,11 @@ void main(){
   o = vec4(mix(c.rgb, c.rgb * d, uLit), c.a);
 }`;
 
-function pushBox(out, center, size, rects, v0 = 0, v1 = 1) {
+function pushBox(out, center, size, rects) {
   const [cx, cy, cz] = center, [sx, sy, sz] = size.map(s => s / 2);
   for (const k of Object.keys(FACES)) {
     const f = FACES[k];
-    let [x, y, w, h] = rects[k];
-    if (k !== 'U' && k !== 'D') { y = y + h * v0; h = h * (v1 - v0); }
-    // R15 joint caps: borrow a thin strip of the front face at that height so gaps don't show bare skin
-    else if (k === 'U' && v0 > 0) { const f = rects.F; [x, y, w, h] = [f[0], f[1] + f[3] * v0, f[2], 1]; }
-    else if (k === 'D' && v1 < 1) { const f = rects.F; [x, y, w, h] = [f[0], f[1] + f[3] * v1 - 1, f[2], 1]; }
+    const [x, y, w, h] = rects[k];
     const u0 = (x + 0.5) / W, u1 = (x + w - 0.5) / W, t0 = (y + 0.5) / H, t1 = (y + h - 0.5) / H;
     const uv = [[u0, t0], [u1, t0], [u1, t1], [u0, t1]];
     const p = f.c.map(c => [cx + c[0] * sx, cy + c[1] * sy, cz + c[2] * sz]);
@@ -88,28 +85,14 @@ function discGeometry(r, y) {
   return out;
 }
 
-function buildRig(type) {
+// Classic R6: six boxes
+function buildRig() {
   const torso = [], arms = [], legs = [];
-  // R15 splits at the same template rows Roblox uses (read from the Woman remap): upper/lower limb at row 62 of 128,
-  // limb/hand-or-foot at 112, upper/lower torso at 95
-  const segs = type === 'R15' ? [[0, 62 / 128], [62 / 128, 112 / 128], [112 / 128, 1]] : [[0, 1]];
-  const tsegs = type === 'R15' ? [[0, 95 / 128], [95 / 128, 1]] : [[0, 1]];
-  const gap = type === 'R15' ? 0.02 : 0;
-  const limb = (out, cx, top, rects) => {
-    for (const [a, b] of segs) {
-      const h = 2 * (b - a) - (segs.length > 1 ? gap : 0);
-      const cy = top - 2 * (a + b) / 2;
-      pushBox(out, [cx, cy, 0], [1, h, 1], rects, a, b);
-    }
-  };
-  for (const [a, b] of tsegs) {
-    const h = 2 * (b - a) - (tsegs.length > 1 ? gap : 0);
-    pushBox(torso, [0, 4 - 2 * (a + b) / 2, 0], [2, h, 1], PARTS.torso, a, b);
-  }
-  limb(arms, -1.5, 4, PARTS.right);
-  limb(arms, 1.5, 4, PARTS.left);
-  limb(legs, -0.5, 2, PARTS.right);
-  limb(legs, 0.5, 2, PARTS.left);
+  pushBox(torso, [0, 3, 0], [2, 2, 1], PARTS.torso);
+  pushBox(arms, [-1.5, 3, 0], [1, 2, 1], PARTS.right);
+  pushBox(arms, [1.5, 3, 0], [1, 2, 1], PARTS.left);
+  pushBox(legs, [-0.5, 1, 0], [1, 2, 1], PARTS.right);
+  pushBox(legs, [0.5, 1, 0], [1, 2, 1], PARTS.left);
   return { torso, arms, legs };
 }
 
@@ -177,8 +160,10 @@ export function createPreview(container) {
   const headMesh = mesh(headGeometry(4.6));
   const groundMesh = mesh(discGeometry(3.4, 0));
 
-  // ---- Woman body: Roblox's own R15 mesh + a per-pixel map of how Roblox composites the template onto it
-  const woman = { mesh: null, ready: false, kind: null, idx: null, tex: texture(), map: null, baseTex: null, fb: null };
+  // ---- Woman and Blocky bodies: Roblox's own R15 meshes + a per-pixel map of how Roblox composites the template onto
+  // their texture atlas. Both use the same atlas, so the map and the built texture are shared
+  const atlas = { ready: false, loading: null, tex: texture(), map: null, baseTex: null, fb: null };
+  const bodies = { Woman: { data: WOMAN.mesh }, Blocky: { data: BLOCKY.mesh, headData: BLOCKY.head } };
   const aprog = gl.createProgram();
   gl.attachShader(aprog, sh(gl.VERTEX_SHADER, ATLAS_VS)); gl.attachShader(aprog, sh(gl.FRAGMENT_SHADER, ATLAS_FS));
   gl.bindAttribLocation(aprog, 0, 'aP'); gl.linkProgram(aprog);
@@ -190,29 +175,34 @@ export function createPreview(container) {
   const garment = { shirt: nearestTex(), pants: nearestTex() };
   const uploadNearest = (t, src) => { gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); };
   const b64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-  async function loadWoman() {
-    if (woman.mesh) return;
-    woman.raw = new Float32Array(b64(WOMAN.mesh).buffer); woman.mesh = mesh(Array.from(woman.raw));
+  async function loadAtlas() {
     const raw = new Uint8Array(await new Response(new Blob([b64(WOMAN.remap)]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
     const n = WOMAN.atlasW * WOMAN.atlasH, inTorso = (x, y) => Object.values(TORSO).some(([rx, ry, rw, rh]) => x >= rx && x < rx + rw && y >= ry && y < ry + rh);
-    woman.kind = new Uint8Array(n); woman.idx = new Int32Array(n);
     const map = new Uint8Array(n * 4); // RGB = the packed template x/y from the remap, A = kind
     for (let p = 0; p < n; p++) {
       const r = raw[p * 3], g = raw[p * 3 + 1], b = raw[p * 3 + 2];
       if (!(b & 32)) continue;
       const x = r | ((b & 3) << 8), y = g | (((b >> 2) & 3) << 8);
-      woman.idx[p] = (y * W + x) * 4;
-      woman.kind[p] = inTorso(x, y) ? 1 : (b & 16) ? 3 : 2; // 1 torso (pants then shirt), 2 shirt only, 3 pants only
-      map[p * 4] = r; map[p * 4 + 1] = g; map[p * 4 + 2] = b; map[p * 4 + 3] = woman.kind[p];
+      map[p * 4] = r; map[p * 4 + 1] = g; map[p * 4 + 2] = b;
+      map[p * 4 + 3] = inTorso(x, y) ? 1 : (b & 16) ? 3 : 2; // 1 torso (pants then shirt), 2 shirt only, 3 pants only
     }
-    woman.map = nearestTex(); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8UI, WOMAN.atlasW, WOMAN.atlasH, 0, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, map);
-    woman.baseTex = nearestTex();
-    gl.bindTexture(gl.TEXTURE_2D, woman.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, WOMAN.atlasW, WOMAN.atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    woman.fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, woman.fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, woman.tex, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    paintWomanBase(); woman.ready = true; update(lastShirt, lastPants);
+    atlas.map = nearestTex(); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8UI, WOMAN.atlasW, WOMAN.atlasH, 0, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, map);
+    atlas.baseTex = nearestTex();
+    gl.bindTexture(gl.TEXTURE_2D, atlas.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, WOMAN.atlasW, WOMAN.atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    atlas.fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, atlas.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, atlas.tex, 0); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    paintAtlasBase(); atlas.ready = true; update(lastShirt, lastPants);
   }
-  function paintWomanBase() {
+  function loadBody(type) {
+    const b = bodies[type];
+    if (!b.mesh) {
+      b.raw = new Float32Array(b64(b.data).buffer); b.mesh = mesh(Array.from(b.raw));
+      // the Blocky export's head has no texture: it gets its own mesh, drawn with the box rigs' head texture
+      if (b.headData) { b.headRaw = new Float32Array(b64(b.headData).buffer); b.head = mesh(Array.from(b.headRaw)); }
+    }
+    atlas.loading ||= loadAtlas();
+  }
+  function paintAtlasBase() {
     const c = document.createElement('canvas'); c.width = WOMAN.atlasW; c.height = WOMAN.atlasH;
     const g = c.getContext('2d'); g.fillStyle = opts.skin; g.fillRect(0, 0, c.width, c.height);
     if (opts.face) {
@@ -220,29 +210,28 @@ export function createPreview(container) {
       g.fillStyle = '#1b1b1f'; g.beginPath(); g.ellipse(ex1, ey, 9, 19, 0, 0, Math.PI * 2); g.ellipse(ex2, ey, 9, 19, 0, 0, Math.PI * 2); g.fill();
       g.strokeStyle = '#1b1b1f'; g.lineWidth = 7; g.lineCap = 'round'; g.beginPath(); g.arc(mx, my - 40, 38, 0.2 * Math.PI, 0.8 * Math.PI); g.stroke();
     }
-    uploadNearest(woman.baseTex, c);
+    uploadNearest(atlas.baseTex, c);
   }
-  function buildWomanAtlas(shirt, pants) {
+  function buildAtlas(shirt, pants) {
     const S = opts.showShirt && shirt, P = opts.showPants && pants;
     if (S) uploadNearest(garment.shirt, shirt); if (P) uploadNearest(garment.pants, pants);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, woman.fb); gl.viewport(0, 0, WOMAN.atlasW, WOMAN.atlasH);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, atlas.fb); gl.viewport(0, 0, WOMAN.atlasW, WOMAN.atlasH);
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
     gl.useProgram(aprog);
     const unit = (i, t, u) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(u, i); };
-    unit(1, woman.map, aloc.map); unit(2, woman.baseTex, aloc.base); unit(3, garment.shirt, aloc.shirt); unit(4, garment.pants, aloc.pants);
+    unit(1, atlas.map, aloc.map); unit(2, atlas.baseTex, aloc.base); unit(3, garment.shirt, aloc.shirt); unit(4, garment.pants, aloc.pants);
     const sk = parseInt(opts.skin.slice(1), 16); gl.uniform3f(aloc.skin, (sk >> 16) / 255, ((sk >> 8) & 255) / 255, (sk & 255) / 255);
     gl.uniform1i(aloc.show, (S ? 1 : 0) | (P ? 2 : 0));
     gl.bindVertexArray(quad); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, woman.tex); gl.generateMipmap(gl.TEXTURE_2D);
+    gl.bindTexture(gl.TEXTURE_2D, atlas.tex); gl.generateMipmap(gl.TEXTURE_2D);
   }
 
   function setRig(type) {
+    if (type !== 'R6' && !bodies[type]) type = 'Woman';
     opts.rig = type; dirty = true;
-    if (type === 'Woman') { loadWoman(); return; }
-    for (const k of ['torso', 'arms', 'legs']) freeMesh(meshes[k]);
-    const g = buildRig(type);
-    meshes = { torso: mesh(g.torso), arms: mesh(g.arms), legs: mesh(g.legs) };
+    if (bodies[type]) loadBody(type);
+    else if (!meshes.torso) { const g = buildRig(); meshes = { torso: mesh(g.torso), arms: mesh(g.arms), legs: mesh(g.legs) }; }
     update(lastShirt, lastPants);
   }
 
@@ -266,7 +255,7 @@ export function createPreview(container) {
   let lastShirt = null, lastPants = null;
   function update(shirt, pants) {
     lastShirt = shirt; lastPants = pants;
-    if (opts.rig === 'Woman') { if (woman.ready) buildWomanAtlas(shirt, pants); dirty = true; return; }
+    if (bodies[opts.rig]) { if (atlas.ready) buildAtlas(shirt, pants); dirty = true; return; }
     const base = (c) => { const g = c.getContext('2d'); g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1; g.fillStyle = opts.skin; g.fillRect(0, 0, W, H); return g; };
     let g = base(cv.torso); if (opts.showPants && pants) g.drawImage(pants, 0, 0); if (opts.showShirt && shirt) g.drawImage(shirt, 0, 0);
     g = base(cv.arms); if (opts.showShirt && shirt) g.drawImage(shirt, 0, 0);
@@ -309,8 +298,12 @@ export function createPreview(container) {
     const eye = [cam.dist * Math.sin(cam.phi) * Math.sin(cam.theta), cam.ty + cam.dist * Math.cos(cam.phi), cam.dist * Math.sin(cam.phi) * Math.cos(cam.theta)];
     return mul(perspective(0.6, canvas.width / canvas.height, 0.1, 100), lookAt(eye, [0, cam.ty, 0], [0, 1, 0]));
   };
-  // [mesh, texture, pick part]: part 0 = Woman (atlas lookup), 1 torso, 2 arms, 3 legs, -1 head (blocks picks, never paints)
-  const bodyList = () => opts.rig === 'Woman' ? (woman.ready ? [[woman.mesh, woman.tex, 0]] : []) : [[meshes.torso, tex.torso, 1], [meshes.arms, tex.arms, 2], [meshes.legs, tex.legs, 3], [headMesh, tex.head, -1]];
+  // [mesh, texture] pairs to draw
+  const bodyList = () => {
+    const b = bodies[opts.rig];
+    if (b) return atlas.ready ? [[b.mesh, atlas.tex], ...(b.head ? [[b.head, tex.head]] : [])] : [];
+    return [[meshes.torso, tex.torso], [meshes.arms, tex.arms], [meshes.legs, tex.legs], [headMesh, tex.head]];
+  };
   function draw({ keepSize = false, shadow = true } = {}) {
     if (!keepSize) resize();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -330,11 +323,12 @@ export function createPreview(container) {
 
   // ---- still images (Save preview image): drawn off screen at any size, framed on the body
   function bodyBounds() {
-    if (opts.rig === 'Woman' && woman.ready) {
-      if (woman.bb) return woman.bb;
-      const a = woman.raw; let y0 = Infinity, y1 = -Infinity, r = 0;
-      for (let i = 0; i < a.length; i += 8) { y0 = Math.min(y0, a[i + 1]); y1 = Math.max(y1, a[i + 1]); r = Math.max(r, Math.hypot(a[i], a[i + 2])); }
-      return (woman.bb = { y0, y1, r });
+    const b = bodies[opts.rig];
+    if (b?.raw) {
+      if (b.bb) return b.bb;
+      let y0 = Infinity, y1 = -Infinity, r = 0;
+      for (const a of [b.raw, b.headRaw]) if (a) for (let i = 0; i < a.length; i += 8) { y0 = Math.min(y0, a[i + 1]); y1 = Math.max(y1, a[i + 1]); r = Math.max(r, Math.hypot(a[i], a[i + 2])); }
+      return (b.bb = { y0, y1, r });
     }
     return { y0: 0, y1: 5.25, r: 2.1 };
   }
@@ -367,9 +361,9 @@ export function createPreview(container) {
   return {
     update,
     setRig,
-    setSkin(c) { opts.skin = c; paintHead(); if (woman.ready) paintWomanBase(); update(lastShirt, lastPants); },
+    setSkin(c) { opts.skin = c; paintHead(); if (atlas.ready) paintAtlasBase(); update(lastShirt, lastPants); },
     setShow(shirt, pants) { opts.showShirt = shirt; opts.showPants = pants; update(lastShirt, lastPants); },
-    setFace(on) { opts.face = on; paintHead(); if (woman.ready) { paintWomanBase(); update(lastShirt, lastPants); } dirty = true; },
+    setFace(on) { opts.face = on; paintHead(); if (atlas.ready) { paintAtlasBase(); update(lastShirt, lastPants); } dirty = true; },
     setAutoRotate(on) { opts.autoRotate = on; },
     reset,
     renderImage,
