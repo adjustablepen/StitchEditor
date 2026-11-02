@@ -1,7 +1,7 @@
 {
   "name": "stitch-studio",
   "productName": "Stitch Editor",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Stitch Editor - image and template editor with a live 3D character preview",
   "main": "main.js",
   "private": true,

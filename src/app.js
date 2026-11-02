@@ -475,11 +475,14 @@ const marqueeTool = {
     applySelection(c => { c.beginPath(); s(c); c.fill(); }, o.mode, state.feather, state.antialias);
   },
 };
+// works in whole pixels: the pixel pressed on is always one corner of the box, whichever way the drag goes
 function marqueeShape(o) {
-  let x = Math.min(o.start.x, o.end.x), y = Math.min(o.start.y, o.end.y), w = Math.abs(o.end.x - o.start.x), h = Math.abs(o.end.y - o.start.y);
-  if (o.constrain) { const m = Math.max(w, h); w = h = m; x = o.end.x < o.start.x ? o.start.x - m : o.start.x; y = o.end.y < o.start.y ? o.start.y - m : o.start.y; }
-  if (state.selType === 'rect') { x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h); return (c) => c.rect(x, y, w, h); }
-  return (c) => c.ellipse(x + w / 2, y + h / 2, Math.max(.5, w / 2), Math.max(.5, h / 2), 0, 0, Math.PI * 2);
+  const sx = Math.floor(o.start.x), sy = Math.floor(o.start.y);
+  let dx = Math.floor(o.end.x) - sx, dy = Math.floor(o.end.y) - sy;
+  if (o.constrain) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = dx < 0 ? -m : m; dy = dy < 0 ? -m : m; }
+  const x = Math.min(sx, sx + dx), y = Math.min(sy, sy + dy), w = Math.abs(dx) + 1, h = Math.abs(dy) + 1;
+  if (state.selType === 'rect') return (c) => c.rect(x, y, w, h);
+  return (c) => c.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
 }
 // lasso: free, polygon, magnetic
 let lasso = null, gradMap = null;
@@ -2526,18 +2529,19 @@ $('#autoRot').onchange = () => preview?.setAutoRotate($('#autoRot').checked);
 $('#btnShot').onclick = () => openRenderDialog();
 
 // ---- Save preview image: a clean render of the model from a chosen side, for thumbnails and adverts
-const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', null], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
+// pairs list [front, back] angles; the three-quarter pair turns the back the other way so the two mirror each other
+const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', [0, Math.PI]], ['pair3', '3/4 front + back', [0.6, Math.PI - 0.6]], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
 const renderOpts = { view: 'front', size: 1024, bg: 'none', color: '#ffffff', shadow: true };
 function renderPreview(size) {
   const o = renderOpts, bg = o.bg === 'color' ? o.color : null;
-  if (o.view === 'pair') {
+  const v = RENDER_VIEWS.find(r => r[0] === o.view);
+  if (Array.isArray(v[2])) {
     const out = mkCanvas(size, size), x = out.getContext('2d'); if (bg) { x.fillStyle = bg; x.fillRect(0, 0, size, size); }
     const half = Math.round(size / 2);
-    x.drawImage(preview.renderImage({ w: half, h: size, view: { theta: 0 }, shadow: o.shadow }), 0, 0);
-    x.drawImage(preview.renderImage({ w: size - half, h: size, view: { theta: Math.PI }, shadow: o.shadow }), half, 0);
+    x.drawImage(preview.renderImage({ w: half, h: size, view: { theta: v[2][0] }, shadow: o.shadow }), 0, 0);
+    x.drawImage(preview.renderImage({ w: size - half, h: size, view: { theta: v[2][1] }, shadow: o.shadow }), half, 0);
     return out;
   }
-  const v = RENDER_VIEWS.find(r => r[0] === o.view);
   return preview.renderImage({ w: size, h: size, view: o.view === 'current' ? null : { theta: v[2] }, shadow: o.shadow, background: bg });
 }
 function openRenderDialog() {

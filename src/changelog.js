@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.8.1', notes: [
+    'The select box no longer jumps when you start dragging: the pixel you press on always stays a corner of the box.',
+    'Save preview image has a new "3/4 front + back" view: the three-quarter front next to the back, turned the other way.',
+  ] },
   { version: '0.8.0', notes: [
     'Seams now work like drawing on the real body: with Seams ticked, a Brush, Pencil or Eraser stroke that runs off a face carries on from the edge it joins. Untick Seams to draw normally.',
     'Painting on the 3D preview and the red seam check have been removed. The new Seams makes them unnecessary.',
