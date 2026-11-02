@@ -2536,8 +2536,8 @@ $('#autoRot').onchange = () => preview?.setAutoRotate($('#autoRot').checked);
 $('#btnShot').onclick = () => openRenderDialog();
 
 // ---- Save preview image: a clean render of the model from a chosen side, for thumbnails and adverts
-// pairs list [front, back] angles; the three-quarter pair turns the back the other way so the two mirror each other
-const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', [0, Math.PI]], ['pair3', '3/4 front + back', [0.6, Math.PI - 0.6]], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
+// pairs list [front, back] angles; the three-quarter back is the same pose seen from behind
+const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', [0, Math.PI]], ['pair3', '3/4 front + back', [0.6, Math.PI + 0.6]], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
 const renderOpts = { view: 'front', size: 1024, bg: 'none', color: '#ffffff', shadow: true };
 function renderPreview(size) {
   const o = renderOpts, bg = o.bg === 'color' ? o.color : null;

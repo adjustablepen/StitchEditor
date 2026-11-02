@@ -1,5 +1,8 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.8.3', notes: [
+    'The "3/4 front + back" preview image now shows the back turned the right way: the same pose as the front, seen from behind.',
+  ] },
   { version: '0.8.2', notes: [
     'Layers that use your Colours (colour fills) now always show up when you open a project. Before, they sometimes stayed blank until you changed a colour.',
   ] },
