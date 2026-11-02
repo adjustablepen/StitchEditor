@@ -1,5 +1,16 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.8.0', notes: [
+    'Seams now work like drawing on the real body: with Seams ticked, a Brush, Pencil or Eraser stroke that runs off a face carries on from the edge it joins. Untick Seams to draw normally.',
+    'Painting on the 3D preview and the red seam check have been removed. The new Seams makes them unnecessary.',
+    'Selecting several layers and dragging them (or using the arrow keys) moves them all together.',
+    'Snap guides are green when you line up with another layer and pink for the canvas and template.',
+    'Opening a Pixlr file the size of a template asks whether to open it as a normal canvas or as a shirt or pants. Other sizes open as a normal canvas at their own size.',
+    'Typing a new width or height for a layer resizes it from its centre.',
+    'Deleting the last layer leaves a new blank layer instead of refusing.',
+    'Rotating a gradient (or a drop shadow) on text now works.',
+    'The Fill box for text and shapes shows the fill colour again.',
+  ] },
   { version: '0.7.0', notes: [
     'Paint on the 3D model: turn on the brush button under the preview and paint straight onto the body with the Brush, Pencil, Eraser, Fill or Eyedropper. Right-drag turns the model.',
     'Seams: tick Seams to see which edges join on the body and where the colours don’t match. The Brush and Eraser can wrap strokes over an edge onto the face it joins (Wrap seams).',

@@ -8,19 +8,6 @@ uniform mat4 uVP;
 out vec3 vN; out vec2 vUv;
 void main(){ vN = aNor; vUv = aUv; gl_Position = uVP * vec4(aPos, 1.0); }`;
 
-// picking: writes where on the template (or the Woman atlas) each screen pixel is.
-// RG = u (16 bit), B + A = v (13 bit) | part (2 bit) | hit flag. part: 0 Woman (look up the atlas), 1 torso, 2 arms (shirt), 3 legs (pants)
-const PICK_FS = `#version 300 es
-precision highp float;
-in vec3 vN; in vec2 vUv;
-uniform int uPart;
-out vec4 o;
-void main(){
-  uint u = uint(clamp(vUv.x, 0.0, 1.0) * 65535.0), v = uint(clamp(vUv.y, 0.0, 1.0) * 8191.0);
-  uint ba = (v << 3) | (uint(uPart) << 1) | 1u;
-  o = vec4(float(u >> 8) / 255.0, float(u & 255u) / 255.0, float(ba >> 8) / 255.0, float(ba & 255u) / 255.0);
-}`;
-
 // builds the Woman texture: every atlas pixel either keeps the skin/face base or takes its template pixel
 // (pants first, then shirt over it), using the remap from woman-data.js
 const ATLAS_VS = `#version 300 es
@@ -156,10 +143,6 @@ export function createPreview(container) {
   gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
   gl.bindAttribLocation(prog, 0, 'aPos'); gl.bindAttribLocation(prog, 1, 'aNor'); gl.bindAttribLocation(prog, 2, 'aUv'); gl.linkProgram(prog);
   gl.useProgram(prog);
-  const pprog = gl.createProgram();
-  gl.attachShader(pprog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(pprog, sh(gl.FRAGMENT_SHADER, PICK_FS));
-  gl.bindAttribLocation(pprog, 0, 'aPos'); gl.bindAttribLocation(pprog, 1, 'aNor'); gl.bindAttribLocation(pprog, 2, 'aUv'); gl.linkProgram(pprog);
-  const ploc = { vp: gl.getUniformLocation(pprog, 'uVP'), part: gl.getUniformLocation(pprog, 'uPart') };
   const loc = { pos: gl.getAttribLocation(prog, 'aPos'), nor: gl.getAttribLocation(prog, 'aNor'), uv: gl.getAttribLocation(prog, 'aUv'), vp: gl.getUniformLocation(prog, 'uVP'), tex: gl.getUniformLocation(prog, 'uTex'), lit: gl.getUniformLocation(prog, 'uLit') };
 
   function mesh(data) {
@@ -291,31 +274,26 @@ export function createPreview(container) {
   }
 
   // ---- camera: left drag orbits, right drag (or Shift) pans, wheel zooms.
-  // Paint mode: the left button paints on the model instead, the right button orbits and Shift+right pans.
   const cam = { theta: 0.55, phi: 1.32, dist: 11.5, ty: 2.55 };
   const defaults = { ...cam };
-  let dirty = true, drag = null, painting = null;
+  let dirty = true, drag = null;
   canvas.addEventListener('pointerdown', e => {
     canvas.setPointerCapture(e.pointerId);
-    if (opts.paint && e.button === 0 && !e.shiftKey && hooks.onPaint) {
-      const p = devPt(e); painting = p; hooks.onPaint('down', [sampleAt(p.x, p.y)], e); return;
-    }
-    const pan = e.button === 1 || (opts.paint ? e.button === 2 && e.shiftKey : e.button === 2 || e.shiftKey);
+    const pan = e.button === 1 || e.button === 2 || e.shiftKey;
     drag = { x: e.clientX, y: e.clientY, pan };
   });
   canvas.addEventListener('pointermove', e => {
-    if (painting) { const p = devPt(e); hooks.onPaint('move', sampleLine(painting, p), e); painting = p; return; }
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
     if (drag.pan) cam.ty = Math.min(5, Math.max(0, cam.ty + dy * 0.01));
     else { cam.theta -= dx * 0.01; cam.phi = Math.min(2.9, Math.max(0.15, cam.phi - dy * 0.01)); }
     dirty = true;
   });
-  const endDrag = (e) => { if (painting) { painting = null; hooks.onPaint('up', [], e); } drag = null; };
+  const endDrag = () => { drag = null; };
   canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.min(30, Math.max(4, cam.dist * (1 + Math.sign(e.deltaY) * 0.1))); dirty = true; }, { passive: false });
-  canvas.addEventListener('dblclick', () => { if (!opts.paint) reset(); });
+  canvas.addEventListener('dblclick', () => reset());
   function reset() { Object.assign(cam, defaults); dirty = true; }
 
   function resize() {
@@ -348,56 +326,6 @@ export function createPreview(container) {
     gl.bindVertexArray(null);
   }
 
-  // ---- picking: the pick pass is drawn and read back once per camera position, then every sample is a lookup
-  let pick = null; // { key, w, h, data }
-  const fbo = { fb: null, tex: null, depth: null, w: 0, h: 0 };
-  const camKey = () => [cam.theta, cam.phi, cam.dist, cam.ty, canvas.width, canvas.height, opts.rig, woman.ready].join('|');
-  function readPick() {
-    const key = camKey(); if (pick && pick.key === key) return pick;
-    const w = canvas.width, h = canvas.height;
-    if (fbo.w !== w || fbo.h !== h) {
-      if (fbo.fb) { gl.deleteFramebuffer(fbo.fb); gl.deleteTexture(fbo.tex); gl.deleteRenderbuffer(fbo.depth); }
-      fbo.fb = gl.createFramebuffer(); fbo.tex = gl.createTexture(); fbo.depth = gl.createRenderbuffer(); fbo.w = w; fbo.h = h;
-      gl.bindTexture(gl.TEXTURE_2D, fbo.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.bindRenderbuffer(gl.RENDERBUFFER, fbo.depth); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbo.tex, 0);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, fbo.depth);
-    }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb); gl.viewport(0, 0, w, h);
-    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
-    gl.useProgram(pprog); gl.uniformMatrix4fv(ploc.vp, false, viewProj());
-    for (const [m, , part] of bodyList()) {
-      gl.uniform1i(ploc.part, Math.max(0, part)); if (part < 0) gl.colorMask(false, false, false, false);
-      gl.bindVertexArray(m.vao); gl.drawArrays(gl.TRIANGLES, 0, m.count); gl.colorMask(true, true, true, true);
-    }
-    gl.bindVertexArray(null);
-    const data = new Uint8Array(w * h * 4); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return (pick = { key, w, h, data });
-  }
-  const devPt = (e) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * canvas.width, y: (e.clientY - r.top) / r.height * canvas.height }; };
-  // the template point under a canvas pixel: { x, y, kind } (kind 1 torso, 2 shirt only, 3 pants only) or null
-  function sampleAt(px, py) {
-    const P = readPick(), x = Math.floor(px), y = Math.floor(py);
-    if (x < 0 || y < 0 || x >= P.w || y >= P.h) return null;
-    const i = ((P.h - 1 - y) * P.w + x) * 4, d = P.data, ba = (d[i + 2] << 8) | d[i + 3];
-    if (!(ba & 1)) return null;
-    const part = (ba >> 1) & 3, u = ((d[i] << 8) | d[i + 1]) / 65535, v = (ba >> 3) / 8191;
-    if (part) return { x: u * W, y: v * H, kind: part };
-    const ax = Math.min(WOMAN.atlasW - 1, Math.floor(u * WOMAN.atlasW)), ay = Math.min(WOMAN.atlasH - 1, Math.floor(v * WOMAN.atlasH)), p = ay * WOMAN.atlasW + ax;
-    const k = woman.kind[p]; if (!k) return null;
-    const t = woman.idx[p] / 4;
-    return { x: t % W + .5, y: Math.floor(t / W) + .5, kind: k };
-  }
-  // every canvas pixel between two points, so strokes stay solid however fast the pointer moves
-  function sampleLine(a, b) {
-    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y))), out = [];
-    for (let i = 1; i <= n; i++) out.push(sampleAt(a.x + (b.x - a.x) * i / n, a.y + (b.y - a.y) * i / n));
-    return out;
-  }
-
   // ---- still images (Save preview image): drawn off screen at any size, framed on the body
   function bodyBounds() {
     if (opts.rig === 'Woman' && woman.ready) {
@@ -426,7 +354,7 @@ export function createPreview(container) {
   let last = performance.now();
   function loop(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    if (opts.autoRotate && !drag && !painting) { cam.theta += dt * 0.6; dirty = true; }
+    if (opts.autoRotate && !drag) { cam.theta += dt * 0.6; dirty = true; }
     if (dirty) { dirty = false; draw(); }
     requestAnimationFrame(loop);
   }
@@ -434,7 +362,6 @@ export function createPreview(container) {
   setRig('Woman'); paintGround(); paintHead(); update(null, null);
   requestAnimationFrame(loop);
 
-  const hooks = { onPaint: null };
   return {
     update,
     setRig,
@@ -442,11 +369,8 @@ export function createPreview(container) {
     setShow(shirt, pants) { opts.showShirt = shirt; opts.showPants = pants; update(lastShirt, lastPants); },
     setFace(on) { opts.face = on; paintHead(); if (woman.ready) { paintWomanBase(); update(lastShirt, lastPants); } dirty = true; },
     setAutoRotate(on) { opts.autoRotate = on; },
-    setPaint(on) { opts.paint = on; canvas.classList.toggle('painting', on); if (!on) endDrag({}); },
-    set onPaint(fn) { hooks.onPaint = fn; },
     reset,
     renderImage,
     snapshot() { draw(); return canvas.toDataURL('image/png'); },
-    sampleClient(cx, cy) { const r = canvas.getBoundingClientRect(); return sampleAt((cx - r.left) / r.width * canvas.width, (cy - r.top) / r.height * canvas.height); },
   };
 }

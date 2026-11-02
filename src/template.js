@@ -119,6 +119,11 @@ export function acrossSeam(e, o, p) {
   const qx = o.p1[0] + (o.p0[0] - o.p1[0]) * s, qy = o.p1[1] + (o.p0[1] - o.p1[1]) * s;
   return { x: qx - o.n[0] * d, y: qy - o.n[1] * d, s, d };
 }
+// acrossSeam as a matrix [a, b, c, d, e, f] (x' = a x + c y + e, y' = b x + d y + f), so maps can be chained
+export function seamMatrix(e, o) {
+  const q0 = acrossSeam(e, o, { x: 0, y: 0 }), qx = acrossSeam(e, o, { x: 1, y: 0 }), qy = acrossSeam(e, o, { x: 0, y: 1 });
+  return [qx.x - q0.x, qx.y - q0.y, qy.x - q0.x, qy.y - q0.y, q0.x, q0.y];
+}
 // the face rect (and its part) a template point is in
 export const ALL_FACES = ['torso', 'right', 'left'].flatMap(part => FACE_ORDER.map(face => ({ part, face, rect: PARTS[part][face] })));
 export function faceAt(x, y) {

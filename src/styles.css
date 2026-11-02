@@ -414,7 +414,7 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 
 /* ===================== shapes, text, fill dialog ===================== */
 .ob-swatch { width: 40px; height: 26px; padding: 2px; background: #1f1f1f; border: 1px solid #4a4a4a; border-radius: 4px; display: grid; }
-.ob-swatch span { border-radius: 2px; }
+.ob-swatch span { display: block; height: 100%; border-radius: 2px; }
 .ob-swatch:hover { border-color: #8a8a8a; background: #1f1f1f; }
 .ob-outline { height: 30px; min-width: 86px; padding: 0 16px; background: transparent; border: 1px solid #8a8a8a; border-radius: 4px; color: #e6e6e6; font-size: 12.5px; }
 .ob-outline:hover { background: #333; border-color: #bdbdbd; }
@@ -596,7 +596,10 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 .zoom-dock > .panel .preview { min-height: 140px; }
 .zoom-dock > .panel[hidden] { display: none !important; }
 .zoom-dock .dock-marker { margin: 0 4px; }
-.pxz-kind { display: grid !important; grid-template-columns: 1fr 1fr; margin: 2px 0 6px; }
+.dlg:has(.openimg-row.three) { width: 560px; }
+.openimg-row.three { grid-template-columns: 1fr 1fr 1fr; }
+.pxz-kind-row { display: flex; align-items: center; gap: 10px; color: #b0b0b0; font-size: 13px; padding-bottom: 6px; }
+.pxz-kind { display: grid !important; grid-template-columns: 1fr 1fr; width: 180px; }
 .pxz-kind .ob-segbtn { height: 32px; }
 
 #overlay { position: absolute; left: 0; top: 34px; width: 100%; height: calc(100% - 34px); pointer-events: none; z-index: 2; display: block; }
@@ -724,8 +727,6 @@ button, .stab, .tab, .proj, .home-big, .layer, .hist, .mb-entry, .np-type { tran
 
 .preview-controls #btnPaint3d { margin-left: auto; }
 .preview-controls #btnPaint3d.on { background: var(--accent); color: #fff; }
-.preview-canvas.painting { cursor: crosshair; }
-.preview-canvas.painting:active { cursor: crosshair; }
 .render-dlg { display: flex; gap: 16px; align-items: flex-start; }
 .render-prev { width: 320px; height: 320px; border-radius: 6px; background: #20232b; flex: none; }
 .render-prev.checker { background: repeating-conic-gradient(#3a3a3a 0 25%, #2a2a2a 0 50%) 0 0/16px 16px; }

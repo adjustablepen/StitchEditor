@@ -1,4 +1,4 @@
-import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, SEAMS, EDGES, acrossSeam, faceAt } from './template.js';
+import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, EDGES, acrossSeam, seamMatrix, faceAt } from './template.js';
 import { CHANGELOG } from './changelog.js';
 import { createPreview } from './preview.js';
 
@@ -141,66 +141,12 @@ function drawOverlay() {
     const limb = state.mode === 'pants' ? 'LEG' : 'ARM';
     lbl('TORSO', 168, 20); lbl('RIGHT ' + limb, 22, 300); lbl('LEFT ' + limb, 377, 300);
   }
-  if (state.seams && isTemplate()) drawSeams(o);
   const cur = currentRegion();
   if (cur.id !== 'all') {
     o.lineWidth = dpx(1.5); o.strokeStyle = '#ffb84d';
     for (const r of cur.rects) o.strokeRect(r[0] + .75, r[1] + .75, r[2] - 1.5, r[3] - 1.5);
   }
   drawToolOverlay(o);
-}
-
-// ------------------------------------------------------------------ seams (edges that meet on the body)
-// Seam check marks, in red, every stretch of a seam where the colours on the two sides don't match
-let seamCache = null;
-function seamMismatches() {
-  const key = state.mode + '|' + editVersion + '|' + state.setIdx;
-  if (seamCache && seamCache.key === key) return seamCache;
-  const d = doc(); compositeDoc(d); const px = d.comp.getContext('2d').getImageData(0, 0, W, H).data;
-  const at = (x, y) => (Math.min(H - 1, Math.max(0, Math.floor(y))) * W + Math.min(W - 1, Math.max(0, Math.floor(x)))) * 4;
-  const differ = (i, j) => {
-    const a1 = px[i + 3], a2 = px[j + 3]; if (a1 < 16 && a2 < 16) return false;
-    if (Math.abs(a1 - a2) > 64) return true;
-    return Math.max(Math.abs(px[i] - px[j]), Math.abs(px[i + 1] - px[j + 1]), Math.abs(px[i + 2] - px[j + 2])) > 48;
-  };
-  const runs = []; let bad = 0;
-  for (const sm of SEAMS) {
-    const { a, b } = sm, len = Math.round(Math.hypot(a.p1[0] - a.p0[0], a.p1[1] - a.p0[1])); let start = -1, any = false;
-    const flush = (i) => { if (start < 0) return; runs.push({ a, b, s0: start / len, s1: i / len }); start = -1; any = true; };
-    for (let i = 0; i < len; i++) {
-      const s = (i + .5) / len;
-      const ax = a.p0[0] + (a.p1[0] - a.p0[0]) * s + a.n[0] * .5, ay = a.p0[1] + (a.p1[1] - a.p0[1]) * s + a.n[1] * .5;
-      const bx = b.p1[0] + (b.p0[0] - b.p1[0]) * s + b.n[0] * .5, by = b.p1[1] + (b.p0[1] - b.p1[1]) * s + b.n[1] * .5;
-      if (differ(at(ax, ay), at(bx, by))) { if (start < 0) start = i; } else flush(i);
-    }
-    flush(len); if (any) bad++;
-  }
-  return (seamCache = { key, runs, bad });
-}
-const seamPt = (e, s) => [e.p0[0] + (e.p1[0] - e.p0[0]) * s, e.p0[1] + (e.p1[1] - e.p0[1]) * s];
-function drawSeams(o) {
-  const { runs } = seamMismatches();
-  o.save(); o.lineCap = 'butt'; o.lineWidth = dpx(3); o.strokeStyle = 'rgba(255,60,60,.95)'; o.beginPath();
-  for (const r of runs) {
-    // a's stretch runs s0 -> s1; on b the same stretch runs backwards
-    o.moveTo(...seamPt(r.a, r.s0)); o.lineTo(...seamPt(r.a, r.s1));
-    o.moveTo(...seamPt(r.b, 1 - r.s0)); o.lineTo(...seamPt(r.b, 1 - r.s1));
-  }
-  o.stroke();
-  // hovering near an edge shows the edge it joins
-  const f = hover && faceAt(hover.x, hover.y);
-  if (f) {
-    let best = null;
-    for (const { e, o: other } of EDGES) if (e.part === f.part && e.face === f.face) { const q = acrossSeam(e, other, hover); if (q.d >= 0 && (!best || q.d < best.d)) best = { e, other, d: q.d }; }
-    if (best && best.d <= Math.max(6, dpx(14))) {
-      o.lineWidth = dpx(2.5); o.strokeStyle = '#ff4fd8'; o.setLineDash([]);
-      for (const e of [best.e, best.other]) { o.beginPath(); o.moveTo(...e.p0); o.lineTo(...e.p1); o.stroke(); }
-      // arrows show which way round they join: the start of one edge meets the end of the other
-      o.fillStyle = '#ff4fd8'; const dot = (p) => { o.beginPath(); o.arc(p[0], p[1], dpx(3.5), 0, Math.PI * 2); o.fill(); };
-      dot(best.e.p0); dot(best.other.p1);
-    }
-  }
-  o.restore();
 }
 
 // ------------------------------------------------------------------ zoom & pan
@@ -652,7 +598,7 @@ function stampAt(p) {
     if (b.scatter) { const a = Math.random() * Math.PI * 2, d = Math.random() * b.size * .6; x += Math.cos(a) * d; y += Math.sin(a) * d; }
     const tip = op.tips.get(Math.round(size * 2) / 2) || (() => { const t = tintedTip(makeTip(b, size, b.hard), state.tool === 'eraser' ? '#000' : state.fg); op.tips.set(Math.round(size * 2) / 2, t); return t; })();
     sctx.globalAlpha = b.flow / 100;
-    if (isTemplate() && (painting3d || b.wrap)) stampWrapped(tip, x, y, b.hard);
+    if (isTemplate() && state.seams) stampWrapped(tip, x, y, b.hard);
     else stampTip(tip, x, y, b.hard);
   }
 }
@@ -661,7 +607,7 @@ function stampTip(tip, x, y, hard, clipRect) {
   if (!clipRect) { sctx.drawImage(tip, dx, dy); return; }
   sctx.save(); sctx.beginPath(); sctx.rect(...clipRect); sctx.clip(); sctx.drawImage(tip, dx, dy); sctx.restore();
 }
-// Wrap seams: a dab stays on its own face, and the part that would hang over an edge lands on the face that
+// Seams: a dab stays on its own face, and the part that would hang over an edge lands on the face that
 // edge joins on the 3D body (wherever that face sits on the template)
 function stampWrapped(tip, x, y, hard) {
   const f = faceAt(x, y); if (!f) { stampTip(tip, x, y, hard); return; }
@@ -701,6 +647,38 @@ const brushTool = {
   up() { if (!op || !op.tips) return; flushComposite(op); lastPoint = op.last; commitOp(op); op = null; },
 };
 let lastPoint = null;
+// Seams on: a stroke that runs off a face carries on from the matching edge of the face it joins on the body.
+// roll.m maps the pointer to where the stroke really is; every edge crossed turns it onto the next face.
+const ROLL_TOOLS = new Set(['brush', 'eraser', 'pencil']);
+let roll = null;
+const mapPt = (m, p) => ({ x: m[0] * p.x + m[2] * p.y + m[4], y: m[1] * p.x + m[3] * p.y + m[5] });
+const mulM = (a, b) => [a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1], a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3], a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5]];
+const inside = (r, p) => p.x >= r[0] && p.y >= r[1] && p.x < r[0] + r[2] && p.y < r[1] + r[3];
+function rollStart(p) {
+  const f = state.seams && isTemplate() && ROLL_TOOLS.has(state.tool) ? faceAt(p.x, p.y) : null;
+  roll = f ? { m: [1, 0, 0, 1, 0, 0], f, last: p, moved: false } : null;
+}
+function rollMove(p, e) {
+  const t = tools[state.tool];
+  if (!roll || !op) { t.move?.(p, e); return; }
+  let v = mapPt(roll.m, p);
+  for (let n = 0; n < 4 && !inside(roll.f.rect, v); n++) {
+    // the edge the stroke leaves through first
+    const a = roll.last, dIn = (E, q) => (q.x - E.p0[0]) * E.n[0] + (q.y - E.p0[1]) * E.n[1]; let best = null;
+    for (const E of EDGES) {
+      if (E.e.part !== roll.f.part || E.e.face !== roll.f.face) continue;
+      const da = dIn(E.e, a), dv = dIn(E.e, v); if (dv >= 0) continue;
+      const k = da <= 0 ? 0 : da / (da - dv); if (!best || k < best.k) best = { E, k };
+    }
+    if (!best) break;
+    const x = { x: a.x + (v.x - a.x) * best.k, y: a.y + (v.y - a.y) * best.k };
+    t.move(x, e); // draw up to the edge
+    const T = seamMatrix(best.E.e, best.E.o), entry = mapPt(T, x);
+    roll.m = mulM(T, roll.m); roll.f = best.E.o; roll.moved = true;
+    op.last = { ...entry, pr: op.last?.pr }; roll.last = entry; v = mapPt(T, v);
+  }
+  t.move(v, e); roll.last = v;
+}
 // pencil: pixel-perfect squares
 function pencilSeg(a, b) {
   const s = state.pencilSize; sctx.fillStyle = state.fg; sctx.globalAlpha = 1;
@@ -827,16 +805,24 @@ function arrInside(p) {
   const a = arr; if (!a || a.empty) return false; const H_ = arrHandles(a), dx = p.x - H_.cx, dy = p.y - H_.cy, tol = 4 / state.zoom;
   return Math.abs(dx * H_.cs + dy * H_.sn) <= a.w / 2 + tol && Math.abs(-dx * H_.sn + dy * H_.cs) <= a.h / 2 + tol;
 }
+// the layers the Move tool moves together: the active group, or several selected layers (null for one layer)
+function moveSet() {
+  const d = doc(); if (d.noSel) return null;
+  if (d.activeGroup) return groupMembers(d.activeGroup);
+  return d.sel?.size > 1 ? d.layers.filter(l => d.sel.has(l.id)) : null;
+}
+function beginGroupMove(mem, p) {
+  op = { gmove: true, start: p, struct: snapStruct(), label: doc().activeGroup ? 'Move group' : 'Move layers', mem: mem.map(l => ({ l, snap: (() => { const c = mkCanvas(); c.getContext('2d').drawImage(l.canvas, 0, 0); return c; })(), vec: clone(l.vec), mask: l.vec?.type === 'fill' ? maskCanvas(l.vec.mask) : null })) };
+  op.snap = snapTargets(new Set(mem.map(l => l.id))); op.b0 = unionBounds(mem);
+}
 const arrangeTool = {
   down(p, e) {
-    const d = doc();
-    if (d.activeGroup && !d.noSel) {
-      const b = unionBounds(groupMembers(d.activeGroup));
+    const d = doc(), mem = moveSet();
+    if (mem) {
+      const b = unionBounds(mem);
       if (b && p.x >= b[0] && p.y >= b[1] && p.x <= b[0] + b[2] && p.y <= b[1] + b[3]) {
-        const mem = groupMembers(d.activeGroup); if (mem.some(l => l.locked)) { toast('A layer in this group is locked'); return; }
-        op = { gmove: true, start: p, struct: snapStruct(), mem: mem.map(l => ({ l, snap: (() => { const c = mkCanvas(); c.getContext('2d').drawImage(l.canvas, 0, 0); return c; })(), vec: clone(l.vec), mask: l.vec?.type === 'fill' ? maskCanvas(l.vec.mask) : null })) };
-        op.snap = snapTargets(new Set(mem.map(l => l.id))); op.b0 = unionBounds(mem);
-        return;
+        if (mem.some(l => l.locked)) { toast(d.activeGroup ? 'A layer in this group is locked' : 'One of the selected layers is locked'); return; }
+        beginGroupMove(mem, p); return;
       }
     }
     let a = d.noSel ? null : ensureArr();
@@ -893,15 +879,20 @@ const arrangeTool = {
     if (op?.gmove) {
       const o = op; op = null; if (!o.moved) return;
       for (const m of o.mem) if (m.live) { const url = m.live.toDataURL(); maskCache.set(url, m.live); m.l.vec = clone(m.vec); m.l.vec.mask = url; m.l.vec.bb = contentBounds({ ctx: m.live.getContext('2d') }) || [0, 0, W, H]; renderFill(m.l); }
-      pushHistory({ t: 'st', label: 'Move group', before: o.struct, after: snapStruct() }); rebuildLayers(); arr = null; drawOverlay(); return;
+      pushHistory({ t: 'st', label: o.label, before: o.struct, after: snapStruct() }); rebuildLayers(); arr = null; drawOverlay(); return;
     }
     if (!op || !op.arr) return; const h = op.arr.hit, a0 = op.arr.a0, a = arr, o = op; op = null;
     if (a.x === a0.x && a.y === a0.y && a.w === a0.w && a.h === a0.h && a.angle === a0.angle) { restoreOp(o); requestRender(); return; }
     arrCommit(o, h === 'move' ? 'Move' : h === 'rot' ? 'Rotate layer' : 'Transform');
   },
-  hover(p) { const d = doc(); if (d.noSel || d.activeGroup) { stack.style.cursor = ''; return; } const a = ensureArr(); stack.style.cursor = a.empty ? '' : arrInside(p) || arrHit(p) !== 'move' ? (arrCursor[arrHit(p)] || 'move') : ''; },
+  hover(p) { const d = doc(); if (d.noSel || moveSet()) { stack.style.cursor = ''; return; } const a = ensureArr(); stack.style.cursor = a.empty ? '' : arrInside(p) || arrHit(p) !== 'move' ? (arrCursor[arrHit(p)] || 'move') : ''; },
 };
-function nudge(dx, dy) { arrApply('Nudge', a => { a.x += dx; a.y += dy; }); }
+function nudge(dx, dy) {
+  const mem = moveSet();
+  if (!mem) { arrApply('Nudge', a => { a.x += dx; a.y += dy; }); return; }
+  if (mem.some(l => l.locked)) { toast('One of the selected layers is locked'); return; }
+  const p = { x: 0, y: 0 }; beginGroupMove(mem, p); arrangeTool.move({ x: dx, y: dy }, { ctrlKey: true }); arrangeTool.up(p); // ctrl: nudges don't snap
+}
 let arrInputs = [];
 function syncArrInputs() { arrInputs.forEach(i => i.sync()); }
 
@@ -954,25 +945,26 @@ function layerBounds(l) {
 function snapTargets(skipIds) {
   const xs = [0, W / 2, W], ys = [0, H / 2, H];
   const add = (b) => { if (!b) return; xs.push(b[0], b[0] + b[2] / 2, b[0] + b[2]); ys.push(b[1], b[1] + b[3] / 2, b[1] + b[3]); };
-  for (const l of doc().layers.slice(-40)) if (!skipIds.has(l.id) && layerVisible(l)) add(layerBounds(l));
   if (isTemplate()) for (const r of regionsFor(state.mode)) if (r.face) add(r.rects[0]);
-  return { xs, ys };
+  const fx = xs.length, fy = ys.length; // targets before these indexes are fixed (canvas, template faces); after are other layers
+  for (const l of doc().layers.slice(-40)) if (!skipIds.has(l.id) && layerVisible(l)) add(layerBounds(l));
+  return { xs, ys, fx, fy };
 }
-// the closest target to any of vals, if within thr: { d: how far to shift, t: the target }
-function snapAxis(vals, targets, thr) { let best = null; for (const v of vals) for (const t of targets) { const d = t - v; if (Math.abs(d) <= thr && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t }; } return best; }
+// the closest target to any of vals, if within thr: { d: how far to shift, t: the target, i: its index }. Ties keep the fixed target
+function snapAxis(vals, targets, thr) { let best = null; for (const v of vals) targets.forEach((t, i) => { const d = t - v; if (Math.abs(d) <= thr && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t, i }; }); return best; }
 // shift needed so a box's left/centre/right and top/middle/bottom land on targets, plus the guide lines to show
 function snapBox(x, y, w, h, T, e) {
   if (!snapOn(e) || !T) return { dx: 0, dy: 0, lines: null };
   const thr = SNAP_PX / state.zoom, sx = snapAxis([x, x + w / 2, x + w], T.xs, thr), sy = snapAxis([y, y + h / 2, y + h], T.ys, thr);
-  return { dx: sx ? Math.round(sx.d) : 0, dy: sy ? Math.round(sy.d) : 0, lines: sx || sy ? { x: sx?.t, y: sy?.t } : null };
+  return { dx: sx ? Math.round(sx.d) : 0, dy: sy ? Math.round(sy.d) : 0, lines: sx || sy ? { x: sx?.t, y: sy?.t, ox: sx?.i >= T.fx, oy: sy?.i >= T.fy } : null };
 }
 // resizing: snap the edges being dragged (sgn says which), keeping whole pixels
 function snapEdges(a, sgn, T) {
   const thr = SNAP_PX / state.zoom, L = {};
-  if (sgn[0] < 0) { const s = snapAxis([a.x], T.xs, thr); if (s) { const t = Math.round(s.t); a.w += a.x - t; a.x = t; L.x = s.t; } }
-  if (sgn[0] > 0) { const s = snapAxis([a.x + a.w], T.xs, thr); if (s) { a.w = Math.round(s.t) - a.x; L.x = s.t; } }
-  if (sgn[1] < 0) { const s = snapAxis([a.y], T.ys, thr); if (s) { const t = Math.round(s.t); a.h += a.y - t; a.y = t; L.y = s.t; } }
-  if (sgn[1] > 0) { const s = snapAxis([a.y + a.h], T.ys, thr); if (s) { a.h = Math.round(s.t) - a.y; L.y = s.t; } }
+  if (sgn[0] < 0) { const s = snapAxis([a.x], T.xs, thr); if (s) { const t = Math.round(s.t); a.w += a.x - t; a.x = t; L.x = s.t; L.ox = s.i >= T.fx; } }
+  if (sgn[0] > 0) { const s = snapAxis([a.x + a.w], T.xs, thr); if (s) { a.w = Math.round(s.t) - a.x; L.x = s.t; L.ox = s.i >= T.fx; } }
+  if (sgn[1] < 0) { const s = snapAxis([a.y], T.ys, thr); if (s) { const t = Math.round(s.t); a.h += a.y - t; a.y = t; L.y = s.t; L.oy = s.i >= T.fy; } }
+  if (sgn[1] > 0) { const s = snapAxis([a.y + a.h], T.ys, thr); if (s) { a.h = Math.round(s.t) - a.y; L.y = s.t; L.oy = s.i >= T.fy; } }
   a.w = Math.max(1, a.w); a.h = Math.max(1, a.h);
   return 'x' in L || 'y' in L ? L : null;
 }
@@ -1030,8 +1022,8 @@ function drawToolOverlay(o) {
     if (lasso && state.lassoType === 'poly') { const f = lasso.pts[0]; o.fillStyle = '#fff'; o.strokeStyle = '#000'; o.beginPath(); o.arc(f.x, f.y, 3 / state.zoom, 0, Math.PI * 2); o.fill(); o.stroke(); }
   }
   drawPenOverlay(o);
-  if (state.tool === 'move' && doc().activeGroup && !doc().noSel) {
-    const b = unionBounds(groupMembers(doc().activeGroup)); if (b) { o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.setLineDash([5 / state.zoom, 3 / state.zoom]); o.strokeRect(b[0], b[1], b[2], b[3]); o.setLineDash([]); }
+  if (state.tool === 'move' && moveSet()) {
+    const b = unionBounds(moveSet()); if (b) { o.lineWidth = 1.2 / state.zoom; o.strokeStyle = '#0099cc'; o.setLineDash([5 / state.zoom, 3 / state.zoom]); o.strokeRect(b[0], b[1], b[2], b[3]); o.setLineDash([]); }
   } else if (state.tool === 'move' && !doc().noSel) drawArrBox(o);
   const vt = state.tool === 'text' || state.tool === 'shape' ? activeLayer()?.vec?.type : null;
   if ((state.tool === 'text' || state.tool === 'shape') && vt === state.tool && !doc().noSel && !(op && !op.viaArr) && !(vt === 'shape' && state.shape.mode === 'draw') && !(vt === 'text' && textEdit)) drawArrBox(o); // while typing: outline only
@@ -1039,17 +1031,19 @@ function drawToolOverlay(o) {
     const v = activeLayer().vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2;
     o.save(); o.translate(cx, cy); o.rotate(v.angle || 0); o.lineWidth = 1 / state.zoom; o.strokeStyle = textEdit ? '#0099cc' : 'rgba(0,153,204,.7)'; o.setLineDash(textEdit ? [] : [4 / state.zoom, 3 / state.zoom]); o.strokeRect(-v.w / 2 - 2, -v.h / 2 - 2, v.w + 4, v.h + 4); o.restore(); o.setLineDash([]);
   }
-  if (op?.snapLines) { // guides showing what a move/resize snapped to
-    const L = op.snapLines; o.save(); o.lineWidth = 1 / state.zoom; o.strokeStyle = '#ff4fa3'; o.setLineDash([]); o.beginPath();
-    if (L.x != null) { o.moveTo(L.x, 0); o.lineTo(L.x, H); } if (L.y != null) { o.moveTo(0, L.y); o.lineTo(W, L.y); }
-    o.stroke(); o.restore();
+  if (op?.snapLines) { // guides showing what a move/resize snapped to: pink = canvas/template, green = another layer
+    const L = op.snapLines; o.save(); o.lineWidth = 1 / state.zoom; o.setLineDash([]);
+    const line = (obj, x0, y0, x1, y1) => { o.strokeStyle = obj ? '#22d36b' : '#ff4fa3'; o.beginPath(); o.moveTo(x0, y0); o.lineTo(x1, y1); o.stroke(); };
+    if (L.x != null) line(L.ox, L.x, 0, L.x, H); if (L.y != null) line(L.oy, 0, L.y, W, L.y);
+    o.restore();
   }
-  if (hover && ['brush', 'eraser', 'pencil'].includes(state.tool)) {
+  const hp = roll?.moved ? roll.last : hover;
+  if (hp && ['brush', 'eraser', 'pencil'].includes(state.tool)) {
     o.lineWidth = 1 / OS;
     for (const [col, off] of [['rgba(0,0,0,.8)', 0], ['rgba(255,255,255,.9)', 1 / OS]]) {
       o.strokeStyle = col; o.beginPath();
-      if (state.tool === 'pencil') { const s = state.pencilSize, x0 = Math.floor(hover.x) - Math.floor((s - 1) / 2), y0 = Math.floor(hover.y) - Math.floor((s - 1) / 2); o.rect(x0 - off, y0 - off, s + off * 2, s + off * 2); }
-      else { const b = brushOf(), r = Math.max(b.size / 2 + off, .5); o.ellipse(hover.x, hover.y, r, Math.max(.5, r * b.round / 100), b.angle * Math.PI / 180, 0, Math.PI * 2); }
+      if (state.tool === 'pencil') { const s = state.pencilSize, x0 = Math.floor(hp.x) - Math.floor((s - 1) / 2), y0 = Math.floor(hp.y) - Math.floor((s - 1) / 2); o.rect(x0 - off, y0 - off, s + off * 2, s + off * 2); }
+      else { const b = brushOf(), r = Math.max(b.size / 2 + off, .5); o.ellipse(hp.x, hp.y, r, Math.max(.5, r * b.round / 100), b.angle * Math.PI / 180, 0, Math.PI * 2); }
       o.stroke();
     }
   }
@@ -1128,7 +1122,9 @@ function buildOptions() {
     const a = () => ensureArr();
     const pos = (k) => obInput(k.toUpperCase(), () => a().empty ? 0 : a()[k], v => arrApply('Move', s => { s[k] = v; }));
     const size = (k) => obInput(k.toUpperCase(), () => a().empty ? 0 : a()[k], v => arrApply('Transform', s => {
-      v = Math.max(1, v); if (state.arrFixed) { const r = k === 'w' ? v / s.w : v / s.h; s.w = Math.max(1, Math.round(s.w * r)); s.h = Math.max(1, Math.round(s.h * r)); } else s[k] = v;
+      v = Math.max(1, v); const cx = s.x + s.w / 2, cy = s.y + s.h / 2; // keeps its centre where it was
+      if (state.arrFixed) { const r = k === 'w' ? v / s.w : v / s.h; s.w = Math.max(1, Math.round(s.w * r)); s.h = Math.max(1, Math.round(s.h * r)); } else s[k] = v;
+      s.x = Math.round(cx - s.w / 2); s.y = Math.round(cy - s.h / 2);
     }));
     const X = pos('x'), Y = pos('y'), Wd = size('w'), Hd = size('h'); arrInputs.push(X, Y, Wd, Hd);
     const lock = obBtn(state.arrFixed ? ICONS.lock : ICONS.unlock, 'Keep proportions', () => { state.arrFixed = !state.arrFixed; buildOptions(); });
@@ -1161,7 +1157,6 @@ function buildOptions() {
       add(obLabel('Mirror:'), m, obToggle('Scatter', () => b.scatter, v => { b.scatter = v; }));
     }
     add(obToggle('Hard tip', () => b.hard, v => { b.hard = v; drawOverlay(); }), obToggle('Pen pressure', () => b.pressure, v => { b.pressure = v; }));
-    if (isTemplate()) { const w = obToggle('Wrap seams', () => b.wrap, v => { b.wrap = v; }); w.title = 'Strokes that run over the edge of a face carry on onto the face it joins on the body'; add(w); }
   } else if (t === 'pencil') {
     add(obLabel('Size:'), obNum(() => state.pencilSize, v => { state.pencilSize = v; drawOverlay(); }, { min: 1, max: 100, suffix: 'px' }), obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }));
   } else if (t === 'fill') {
@@ -1214,7 +1209,7 @@ scroller.addEventListener('pointerdown', e => {
   if (outside && ['text', 'fill', 'eyedropper', 'gradient', 'brush', 'eraser', 'pencil'].includes(state.tool)) { if (textEdit) endTextEdit(); return; }
   if (e.altKey && ['brush', 'pencil', 'fill', 'rect', 'ellipse', 'line', 'gradient', 'text'].includes(state.tool)) { pickColor(p); return; }
   if (e.detail === 2 && tools[state.tool].dbl) { tools[state.tool].dbl(p, e); return; }
-  pointerDown = true;
+  pointerDown = true; rollStart(p);
   tools[state.tool].down?.(p, e);
 });
 scroller.addEventListener('pointermove', e => {
@@ -1226,14 +1221,14 @@ scroller.addEventListener('pointermove', e => {
   if (pointerDown) {
     // painting needs every in-between point; moving/resizing only needs the latest one (keeps dragging text smooth)
     const evs = COALESCE_TOOLS.has(state.tool) && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of (evs.length ? evs : [e])) tools[state.tool].move?.(toPt(ce), ce.pointerType ? ce : e);
+    for (const ce of (evs.length ? evs : [e])) rollMove(toPt(ce), ce.pointerType ? ce : e);
   } else tools[state.tool].hover?.(p, e);
   drawOverlay();
 });
 function endPointer(e) {
   if (pan) { pan = null; stack.classList.remove('panning'); return; }
   if (!pointerDown) return; pointerDown = false;
-  tools[state.tool].up?.(toPt(e), e);
+  tools[state.tool].up?.(toPt(e), e); roll = null;
 }
 scroller.addEventListener('pointerup', endPointer);
 scroller.addEventListener('pointercancel', endPointer);
@@ -1507,7 +1502,7 @@ function renderVec(l) {
   if (v.type === 'shape') drawShapeVec(c, v);
   else {
     // the rendered text is cached until its content or style changes, so moving/rotating it is just a redraw
-    const key = JSON.stringify(v, (k, x) => VEC_PLACE.has(k) ? undefined : x) + document.fonts.check(textFont(v));
+    const key = JSON.stringify(v, function (k, x) { return this === v && VEC_PLACE.has(k) ? undefined : x; }) + document.fonts.check(textFont(v)); // top level only: fill.angle is style
     if (l._tc?.key !== key) l._tc = { key, r: renderTextCanvas(v) };
     const r = l._tc.r; v.w = r.c.width; v.h = r.c.height; v._ox = r.ox; v._oy = r.oy;
     c.translate(v.x + v.w / 2, v.y + v.h / 2); c.rotate(v.angle || 0); c.scale(v.flipX ? -1 : 1, v.flipY ? -1 : 1); c.drawImage(r.c, -v.w / 2, -v.h / 2);
@@ -1845,26 +1840,42 @@ async function readPxz(buf, fileName, tw = W, th = H) {
   return { layers, name: man.name || fileName, skipped };
 
 }
-// Pixlr files hold one template, so ask whether it's a shirt or pants, and whether to start a new set or replace that part of this one
-function askPxz(file) {
+// A Pixlr file the size of a template (585 x 559) can open as a normal canvas, as the shirt or pants of a new template,
+// or replace that part of the open template; any other size opens as a normal canvas at its own size
+async function askPxz(file) {
   const name = file.name.replace(/\.pxz$/i, '');
-  let kind = /pant|leg|trouser|jean|short/i.test(name) ? 'pants' : /shirt|top|hood|jacket|torso/i.test(name) ? 'shirt' : state.mode;
+  let buf, man;
+  try { buf = await file.arrayBuffer(); man = JSON.parse(new TextDecoder().decode((await unzip(buf)).get('manifest.json'))); }
+  catch (err) { toast('Could not open: ' + err.message); return; }
+  const w = clampSide(man.width, TW), h = clampSide(man.height, TH);
+  const open = async (size, fn) => {
+    try { endTextEdit(); const r = await readPxz(buf, name, ...size); fn(r); if (r.skipped.length) toast('Skipped: ' + r.skipped.join(', ')); }
+    catch (err) { toast('Could not open: ' + err.message); }
+  };
+  // a new project: text and shapes are drawn again once the project's size is the current one
+  const fillNew = (st, key, r) => { const d = st.docs[key]; d.layers = r.layers; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; normalizeGroups(d); addSet(st); for (const l of r.layers) if (l.vec) renderVec(l); requestRender(); };
+  const asCanvas = () => open([w, h], (r) => { fillNew(makeSet(r.name, 'canvas', w, h), 'canvas', r); toast(`Opened ${r.name} (${w} × ${h})`); });
+  if (w !== TW || h !== TH) { asCanvas(); return; }
+  let kind = /pant|leg|trouser|jean|short/i.test(name) ? 'pants' : /shirt|top|hood|jacket|torso/i.test(name) ? 'shirt' : (isTemplate() ? state.mode : 'shirt');
   const body = el('div', 'openimg');
-  const p = el('p'); p.textContent = `“${name}” is a…`;
-  const seg = obSeg([{ v: 'shirt', text: 'Shirt' }, { v: 'pants', text: 'Pants' }], () => kind, v => { kind = v; addB.querySelector('span').textContent = `Replace ${kind} in this set`; }); seg.classList.add('pxz-kind');
+  const p = el('p'); p.textContent = `“${name}” is the size of a shirt/pants template. Open it as…`;
   const row = el('div', 'openimg-row');
-  const big = (svg, label, fn, size = [W, H]) => { const b = el('button', 'openimg-btn', svg); const sp = el('span'); sp.textContent = label; b.append(sp); b.onclick = async () => { h.close(); try { endTextEdit(); const r = await readPxz(await file.arrayBuffer(), name, ...size); fn(r); if (r.skipped.length) toast('Skipped: ' + r.skipped.join(', ')); } catch (err) { toast('Could not open: ' + err.message); } }; return b; };
-  const newB = big('<svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="1"/><path d="M24 17v14M17 24h14"/></svg>', 'Create new project', (r) => {
-    const st = makeSet(r.name); st.mode = kind; const d = st.docs[kind]; d.layers = r.layers; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; normalizeGroups(d); addSet(st); toast(`Opened ${r.name} as the ${kind} of a new project`);
-  }, [TW, TH]);
-  const addB = big('<svg viewBox="0 0 48 48"><rect x="6" y="16" width="26" height="22" rx="1"/><path d="M12 16v-6h30v22h-10"/><path d="M15 27h8M19 23l4 4-4 4"/></svg>', `Replace ${kind} in this set`, (r) => {
+  const big = (svg, label, sub, fn) => { const b = el('button', 'openimg-btn np-type', svg); const t = el('span'), sm = el('small'); t.textContent = label; sm.textContent = sub; b.append(t, sm); b.onclick = () => { h_.close(); fn(); }; return b; };
+  const subs = [];
+  const tplB = big(TEMPLATE_ICON, 'Template', '', () => open([TW, TH], (r) => { const st = makeSet(r.name); st.mode = kind; fillNew(st, kind, r); toast(`Opened ${r.name} as the ${kind} of a new project`); }));
+  const addB = big('<svg viewBox="0 0 48 48"><rect x="6" y="16" width="26" height="22" rx="1"/><path d="M12 16v-6h30v22h-10"/><path d="M15 27h8M19 23l4 4-4 4"/></svg>', 'Replace in this project', '', () => open([TW, TH], (r) => {
     if (state.mode !== kind) setMode(kind);
     structOp(() => { const d = doc(); d.layers = r.layers; d.groups = []; d.activeGroup = null; d.activeId = r.layers[r.layers.length - 1].id; d.counter = r.layers.length; }, `Open ${r.name}`);
     toast(`Opened ${r.name} as the ${kind} (Ctrl+Z to undo)`);
-  });
-  row.append(newB); if (!homeOpen() && isTemplate()) row.append(addB); // replacing only makes sense inside an open template
-  body.append(p, seg, row);
-  const h = dlg('Open Pixlr file', body, { noFoot: true });
+  }));
+  const syncKind = () => { tplB.querySelector('small').textContent = `New project, as the ${kind}`; addB.querySelector('small').textContent = `Replaces the ${kind} (undoable)`; };
+  row.append(big(CANVAS_ICON, 'Normal', `A plain canvas, ${w} × ${h}`, asCanvas), tplB);
+  if (!homeOpen() && isTemplate()) row.append(addB); // replacing only makes sense inside an open template
+  row.classList.toggle('three', row.children.length > 2);
+  const seg = obSeg([{ v: 'shirt', text: 'Shirt' }, { v: 'pants', text: 'Pants' }], () => kind, v => { kind = v; syncKind(); }); seg.classList.add('pxz-kind');
+  const segRow = el('div', 'pxz-kind-row'); segRow.append(Object.assign(el('span'), { textContent: 'As a template it is the' }), seg);
+  syncKind(); body.append(p, row, segRow);
+  const h_ = dlg('Open Pixlr file', body, { noFoot: true, center: true, outsideClose: true });
 }
 async function blobToB64(blob) { const u8 = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); }
 const canvasBlob = (c, type = 'image/png', q) => new Promise(res => c.toBlob(res, type, q));
@@ -2132,10 +2143,7 @@ tools.pen = penTool;
 // ------------------------------------------------------------------ fixed right-hand options
 const bindCheck = (id, key, after) => { $(id).onchange = () => { state[key] = $(id).checked; after?.(); }; };
 bindCheck('#optUnderlay', 'underlay', requestRender); bindCheck('#optGuides', 'guides', drawOverlay); bindCheck('#optShade', 'shade', drawOverlay);
-bindCheck('#optSeams', 'seams', () => {
-  drawOverlay(); if (!state.seams || !isTemplate()) return;
-  const n = seamMismatches().bad; toast(n ? `${n} seam${n === 1 ? '' : 's'} don't match (red). Hover near an edge to see the edge it joins.` : 'Every seam matches. Hover near an edge to see the edge it joins.');
-});
+bindCheck('#optSeams', 'seams', () => { if (state.seams && isTemplate()) toast('Seams on: Brush, Pencil and Eraser strokes that run off a face carry on where that edge joins on the body'); });
 $('#colFg').oninput = () => { state.fg = $('#colFg').value; };
 $('#colBg').oninput = () => { state.bg = $('#colBg').value; };
 for (const [id, key, title] of [['#colFg', 'fg', 'Primary colour'], ['#colBg', 'bg', 'Secondary colour']]) {
@@ -2292,7 +2300,7 @@ function rebuildLayers() {
   const op_ = ag ? (ag.opacity ?? 1) : a.opacity;
   $('#lyOpacity').value = Math.round(op_ * 100); $('#lyOpacityVal').textContent = Math.round(op_ * 100) + '%';
   $('#lyBlend').value = a.blend; $('#lyBlend').disabled = !!ag;
-  $('#lyDel').disabled = !ag && selectedIds().length >= d.layers.length;
+  $('#lyDel').disabled = false;
   $('#lyMerge').disabled = !ag && d.layers.indexOf(a) === 0;
   $('#lyMerge').title = ag ? 'Merge group into one layer' : 'Merge down (Ctrl+M)';
   $('#btnUndo').disabled = !d.undo.length; $('#btnRedo').disabled = !d.redo.length;
@@ -2380,9 +2388,11 @@ $('#lyDup').onclick = () => structOp(() => {
   d.layers.splice(d.layers.indexOf(a) + 1, 0, l); d.activeId = l.id; d.sel = new Set([l.id]);
 }, 'Duplicate');
 $('#lyDel').onclick = () => structOp(() => {
-  const d = doc(), ids = new Set(selectedIds()); if (ids.size >= d.layers.length) { toast('Keep at least one layer'); return false; }
+  const d = doc(), ids = new Set(selectedIds());
   const lo = Math.min(...d.layers.map((l, i) => ids.has(l.id) ? i : 1e9));
-  d.layers = d.layers.filter(l => !ids.has(l.id)); d.activeId = d.layers[Math.max(0, Math.min(d.layers.length - 1, lo - 1))].id; d.activeGroup = null; d.sel = new Set([d.activeId]); normalizeGroups(d);
+  d.layers = d.layers.filter(l => !ids.has(l.id));
+  if (!d.layers.length) d.layers.push(makeLayer('Layer ' + (++d.counter))); // deleting the last layer leaves a blank one
+  d.activeId = d.layers[Math.max(0, Math.min(d.layers.length - 1, lo - 1))].id; d.activeGroup = null; d.sel = new Set([d.activeId]); normalizeGroups(d);
 }, selectedIds().length > 1 ? 'Delete layers' : 'Delete layer');
 function moveItem(dir) {
   structOp(() => {
@@ -2514,49 +2524,6 @@ const syncShow = () => preview?.setShow($('#showShirt').checked, $('#showPants')
 $('#showShirt').onchange = syncShow; $('#showPants').onchange = syncShow;
 $('#autoRot').onchange = () => preview?.setAutoRotate($('#autoRot').checked);
 $('#btnShot').onclick = () => openRenderDialog();
-
-// ---- paint on the 3D model: the preview says which template pixel is under the pointer, and the tool paints there
-const PAINT3D_TOOLS = new Set(['brush', 'eraser', 'pencil', 'fill', 'eyedropper']);
-let painting3d = false, p3gap = false, p3wait = false; // p3wait: pressed off the body, the stroke starts when the pointer reaches it
-const fitsMode = (kind) => kind === 1 || kind === (state.mode === 'shirt' ? 2 : 3);
-function paint3d(phase, samples, e) {
-  if (!isTemplate() || homeOpen()) return;
-  const ev = { shiftKey: false, altKey: false, detail: 1, pointerType: e.pointerType, pressure: e.pressure };
-  if (phase === 'down' || (phase === 'move' && p3wait)) {
-    if (phase === 'down') p3wait = false;
-    const i = samples.findIndex(Boolean), s = samples[i];
-    if (!s) { if (phase === 'down') p3wait = PAINT3D_TOOLS.has(state.tool) && !['fill', 'eyedropper'].includes(state.tool); return; }
-    p3wait = false; samples = samples.slice(i + 1);
-    if (!PAINT3D_TOOLS.has(state.tool)) { toast('Painting on the model works with the Brush, Pencil, Eraser, Fill and Eyedropper'); return; }
-    const want = s.kind === 2 ? 'shirt' : s.kind === 3 ? 'pants' : state.mode;
-    if (want !== state.mode) { setMode(want); toast(`Switched to ${want === 'shirt' ? 'Shirt' : 'Pants'}: that part of the body only shows the ${want}`); }
-    const p = { x: s.x, y: s.y };
-    if (state.tool === 'fill') { floodFill(p, ev); return; }
-    if (state.tool === 'eyedropper') { pickColor(p); return; }
-    painting3d = true; p3gap = false;
-    tools[state.tool].down(p, ev); if (!op) { painting3d = false; return; }
-    if (phase === 'down') return;
-  }
-  if (phase === 'up') p3wait = false;
-  if (!painting3d || !op) return;
-  if (phase === 'up') { tools[state.tool].up(); painting3d = false; return; }
-  const pencil = state.tool === 'pencil';
-  for (const s of samples) {
-    if (!s || !fitsMode(s.kind)) { p3gap = true; continue; }
-    const p = { x: s.x, y: s.y, pr: penPressure(ev) };
-    // a jump on the template (crossing onto another face) starts a new dab instead of drawing a line across the template
-    const jump = p3gap || Math.hypot(p.x - op.last.x, p.y - op.last.y) > 6; p3gap = false;
-    if (pencil) { pencilSeg(jump ? p : op.last, p); op.last = p; }
-    else if (jump) { op.last = p; op.carry = 0; stampAt(p); op.carry = Math.max(.5, brushOf().size * Math.max(1, brushOf().step) / 100); }
-    else strokeTo(p);
-  }
-  compositeSoon(pencil ? () => compositeOnto(op, strokeC, { alpha: state.opacity }) : applyBrush);
-}
-if (preview) preview.onPaint = paint3d;
-$('#btnPaint3d').onclick = () => {
-  const on = !$('#btnPaint3d').classList.contains('on'); $('#btnPaint3d').classList.toggle('on', on); preview?.setPaint(on);
-  if (on) { if (!PAINT3D_TOOLS.has(state.tool)) setTool('brush'); toast('Paint on the model with the left button. Right-drag turns it, Shift+right-drag moves it up and down.'); }
-};
 
 // ---- Save preview image: a clean render of the model from a chosen side, for thumbnails and adverts
 const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', null], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
@@ -3397,7 +3364,7 @@ const MENUS = [
     { label: 'Duplicate layer', key: 'Ctrl+D', run: () => $('#lyDup').click() },
     { label: 'Add image as layer…', run: () => $('#btnImport').click() },
     { label: 'Rename layer', key: 'F2', run: renameActive },
-    { label: 'Delete layer', key: 'Del', run: () => $('#lyDel').click(), off: () => doc().layers.length < 2 },
+    { label: 'Delete layer', key: 'Del', run: () => $('#lyDel').click() },
     { label: 'New colour fill from selection', run: newFillFromSelection, off: () => !hasSel },
     { label: 'Convert to colour fill (keep shape)', run: () => convertToFill('alpha') },
     { label: 'Convert to colour fill (black & white mask)', run: () => convertToFill('luma') },
