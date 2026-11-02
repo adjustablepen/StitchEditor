@@ -613,7 +613,7 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 .sw-drop { height: 2px; margin: -1px 4px; background: var(--accent); border-radius: 1px; pointer-events: none; }
 
 /* ---- normal (non-template) canvases: no shirt/pants, preview or template overlays */
-body.canvas-mode .topbar .tabs, body.canvas-mode #previewPanel, body.canvas-mode .opt:has(#optUnderlay), body.canvas-mode .opt:has(#optGuides),
+body.canvas-mode .topbar .tabs, body.canvas-mode #btnPair, body.canvas-mode #otherView, body.canvas-mode #previewPanel, body.canvas-mode .opt:has(#optUnderlay), body.canvas-mode .opt:has(#optGuides),
 body.canvas-mode .opt:has(#optShade), body.canvas-mode .opt:has(#optSeams), body.canvas-mode .opt.region, body.canvas-mode #lyMirrorRL, body.canvas-mode #lyMirrorLR,
 body.canvas-mode #panelsMenu label:has([data-panel="previewPanel"]) { display: none !important; }
 
@@ -797,3 +797,21 @@ button, .stab, .tab, .proj, .home-big, .layer, .hist, .mb-entry, .np-type { tran
 .keys-x svg { width: 14px; height: 14px; }
 .keys-x:hover { color: #e6e6e6; }
 .keys-x[hidden] { display: grid; visibility: hidden; }
+
+/* mirror modifier mark on a layer row */
+.layer .eye.mirror { color: var(--accent); }
+/* shirt and pants side by side: the part not being edited sits next to the canvas (shirt always on the left) */
+.pair-wrap { margin: auto; display: flex; align-items: flex-start; gap: 28px; }
+.pair-wrap > .stack { margin: 0; }
+#otherView { display: none; flex: none; cursor: pointer; opacity: .78; box-shadow: 0 10px 40px rgba(0,0,0,.6); transition: opacity .15s;
+  background-color: #1f1f1f; background-image: conic-gradient(#353535 25%, transparent 0 50%, #353535 0 75%, transparent 0); background-size: 18px 18px; }
+#otherView:hover { opacity: 1; }
+#otherView.pixelated { image-rendering: pixelated; }
+#otherView.before { order: -1; }
+body.pair-view #otherView { display: block; }
+.pair-btn { width: 32px; height: 32px; margin-left: 6px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); }
+.pair-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.pair-btn:hover { color: var(--text); }
+.pair-btn.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+/* recent colours in the colour window */
+.fill-label { font-size: 11px; color: var(--muted); margin: 10px 0 5px; }

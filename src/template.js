@@ -130,3 +130,10 @@ export function faceAt(x, y) {
   for (const f of ALL_FACES) { const [rx, ry, rw, rh] = f.rect; if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) return f; }
   return null;
 }
+// Body symmetry: each face and the face it lands on when the body is mirrored left to right. The right and left
+// limbs swap, and so do each part's Left and Right sides; the torso's Front, Back, Up and Down mirror onto themselves.
+// Every face's horizontal axis runs across the body, so the mirror is always a left-right flip inside the face.
+export const MIRROR_FACES = ALL_FACES.map(f => {
+  const part = f.part === 'right' ? 'left' : f.part === 'left' ? 'right' : 'torso', face = f.face === 'L' ? 'R' : f.face === 'R' ? 'L' : f.face;
+  return { from: f.rect, to: PARTS[part][face] };
+});

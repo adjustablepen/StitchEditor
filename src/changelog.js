@@ -1,5 +1,12 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.10.0', notes: [
+    'Mirror: turn it on for a layer (Shift+M, Layer → Mirror on / off, or the layer settings) and what you draw is drawn on the other side too. One arm draws on the other arm, one half of the torso on the other half, and the back and top stay symmetrical. On a normal canvas it flips across the middle.',
+    'Mirror works with the Brush, Pencil and Eraser. A path drawn with Mirror on gets a twin on the other side that you can edit on its own.',
+    'Only what you do while Mirror is on gets mirrored, and it stays when you turn Mirror off.',
+    'Shirt and pants side by side: the new button next to Shirt / Pants shows both at once. Click the other one to work on it. Turn it off any time.',
+    'Recent colours are remembered after you close the app, and they show in the colour window too.',
+  ] },
   { version: '0.9.0', notes: [
     'Save preview image has a Copy image button: copy the picture straight to the clipboard and paste it anywhere, no file needed. The window stays open so you can copy another view.',
   ] },

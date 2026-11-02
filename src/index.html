@@ -15,6 +15,7 @@
     <button class="tab active" data-mode="shirt">Shirt</button>
     <button class="tab" data-mode="pants">Pants</button>
   </div>
+  <button class="pair-btn" id="btnPair" title="Show shirt and pants side by side"><svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="8.5" height="14" rx="1.5"/><rect x="13" y="5" width="8.5" height="14" rx="1.5"/></svg></button>
   <div class="actions">
     <span hidden><button id="btnNew"></button><button id="btnOpen"></button><button id="btnSave"></button><button id="btnImport"></button></span>
     <div class="menu-wrap"><button id="btnPanels" title="Show or hide panels">Panels ▾</button>
@@ -77,8 +78,11 @@
   <section class="canvas-area">
     <div class="tabbar" id="tabbar"></div>
     <div class="scroller" id="scroller">
-      <div class="stack" id="stack">
-        <canvas id="view" width="585" height="559"></canvas>
+      <div class="pair-wrap" id="pairWrap">
+        <div class="stack" id="stack">
+          <canvas id="view" width="585" height="559"></canvas>
+        </div>
+        <canvas id="otherView" width="585" height="559"></canvas>
       </div>
     </div>
     <canvas id="overlay"></canvas>

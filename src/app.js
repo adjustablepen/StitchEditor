@@ -1,4 +1,4 @@
-import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, EDGES, acrossSeam, seamMatrix, faceAt } from './template.js';
+import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, EDGES, acrossSeam, seamMatrix, faceAt, ALL_FACES, MIRROR_FACES } from './template.js';
 import { CHANGELOG } from './changelog.js';
 import { createPreview } from './preview.js';
 
@@ -44,6 +44,10 @@ const overlay = $('#overlay'), octx = overlay.getContext('2d');
 let OS = 2; // overlay scale: template px → device px (zoom × devicePixelRatio), set every draw
 const dpx = (n) => n * (window.devicePixelRatio || 1) / OS; // n screen pixels, in template units
 const stack = $('#stack'), scroller = $('#scroller');
+// side by side: the template part not being edited shows next to the canvas; clicking it switches to it
+const otherView = $('#otherView'), ovx = otherView.getContext('2d');
+let pairPref = false; try { pairPref = localStorage.getItem('stitch-pair') === '1'; } catch { /* storage unavailable */ }
+const pairOn = () => pairPref && isTemplate();
 const preview = createPreview($('#preview'));
 const templateImg = new Image(); templateImg.src = 'default-template.png'; templateImg.onload = () => requestRender();
 const templateReady = () => templateImg.complete && templateImg.naturalWidth > 0;
@@ -60,6 +64,24 @@ function maskAlpha(l) { // the mask as an alpha channel, rebuilt only after the 
     l._ma.getContext('2d').putImageData(id, 0, 0); l._maDirty = false;
   }
   return l._ma;
+}
+// ---- mirror: while a layer's l.mirror is on, what is painted on it is painted again where it would sit on the other
+// side of the body (arm to arm, leg to leg, one half of the torso onto the other); on a normal canvas, flipped across
+// the middle. Only new strokes and paths are mirrored, and they stay mirrored after it is turned off.
+// the mirror map of the face under (x, y), or null off the template's faces. Path handles use their anchor's map
+// so a curve keeps its shape even where a handle pokes over the face edge.
+function mirrorXf(x, y) {
+  if (!isTemplate()) return (q) => ({ x: W - q.x, y: q.y });
+  const i = ALL_FACES.indexOf(faceAt(x, y)); if (i < 0) return null;
+  const { from: [fx, fy], to: [tx, ty, tw] } = MIRROR_FACES[i];
+  return (q) => ({ x: tx + tw - (q.x - fx), y: ty + (q.y - fy) });
+}
+const mirrorPt = (q) => { const f = mirrorXf(q.x, q.y); return f && { ...f(q), pr: q.pr }; };
+const mirroring = () => !!(op && (op.maskOf || op.real || op.l))?.mirror; // the layer being painted has Mirror on
+// a path's twin on the other side (null if none of its points are on a face)
+function mirrorSub(sp) {
+  const home = sp.pts.map(q => mirrorXf(q.x, q.y)).find(Boolean); if (!home) return null;
+  return { closed: sp.closed, pts: sp.pts.map(q => { const f = mirrorXf(q.x, q.y) || home; return { ...f(q), hin: q.hin && f(q.hin), hout: q.hout && f(q.hout) }; }) };
 }
 let maskScratch = null;
 // what a layer adds to the picture: its pixels, cut by its mask (the result is only good until the next call)
@@ -108,6 +130,12 @@ function render() {
   vctx.clearRect(0, 0, W, H);
   vctx.drawImage(doc().comp, 0, 0);
   if (tpl && state.underlay && templateReady()) vctx.drawImage(templateImg, 0, 0, W, H); // same as export
+  if (pairOn()) {
+    const other = state.docs[state.mode === 'shirt' ? 'pants' : 'shirt'];
+    if (otherView.width !== W || otherView.height !== H) { otherView.width = W; otherView.height = H; }
+    ovx.clearRect(0, 0, W, H); ovx.drawImage(other.comp, 0, 0);
+    if (state.underlay && templateReady()) ovx.drawImage(templateImg, 0, 0, W, H);
+  }
   drawOverlay();
   if (tpl && preview) preview.update(state.docs.shirt.comp, state.docs.pants.comp);
   updateThumbs();
@@ -156,7 +184,8 @@ function setZoom(z, anchor) {
   if (anchor) { const r = stack.getBoundingClientRect(); before = { x: (anchor.x - r.left) / state.zoom, y: (anchor.y - r.top) / state.zoom }; }
   state.zoom = z;
   stack.style.width = W * z + 'px'; stack.style.height = H * z + 'px';
-  view.classList.toggle('pixelated', z >= 2);
+  otherView.style.width = W * z + 'px'; otherView.style.height = H * z + 'px';
+  view.classList.toggle('pixelated', z >= 2); otherView.classList.toggle('pixelated', z >= 2);
   $('#zoomVal').textContent = Math.round(z * 100) + '%';
   requestAnimationFrame(() => drawOverlay());
   if (typeof updateTextEditor === 'function') try { updateTextEditor(); } catch { /* not ready */ }
@@ -168,7 +197,8 @@ function setZoom(z, anchor) {
 }
 function zoomFit() {
   const r = scroller.getBoundingClientRect();
-  setZoom(Math.max(0.25, Math.min((r.width - 48) / W, (r.height - 48) / H)));
+  const two = pairOn(); // side by side: both parts and the gap between them have to fit
+  setZoom(Math.max(0.25, Math.min((r.width - 48 - (two ? 28 : 0)) / (two ? 2 * W : W), (r.height - 48) / H)));
 }
 $('#zoomIn').onclick = () => setZoom(state.zoom * 1.25);
 $('#zoomOut').onclick = () => setZoom(state.zoom / 1.25);
@@ -194,11 +224,11 @@ function pushHistory(entry) {
 function pushPixels(layer, before, vb) { const e = { t: 'px', id: layer.id, before, after: layer.ctx.getImageData(0, 0, W, H) }; if (vb !== undefined || layer.vec) { e.vb = clone(vb); e.va = clone(layer.vec); } pushHistory(e); }
 function snapStruct() {
   const d = doc();
-  return { activeId: d.activeId, activeGroup: d.activeGroup || null, maskEdit: d.maskEdit || null, groups: clone(d.groups || []), layers: d.layers.map(l => ({ id: l.id, name: l.name, kind: l.kind, vec: clone(l.vec), group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, data: l.ctx.getImageData(0, 0, W, H), mask: l.mask ? l.mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H) : null, maskOff: !!l.maskOff })) };
+  return { activeId: d.activeId, activeGroup: d.activeGroup || null, maskEdit: d.maskEdit || null, groups: clone(d.groups || []), layers: d.layers.map(l => ({ id: l.id, name: l.name, kind: l.kind, vec: clone(l.vec), group: l.group || null, locked: !!l.locked, mirror: !!l.mirror, visible: l.visible, opacity: l.opacity, blend: l.blend, data: l.ctx.getImageData(0, 0, W, H), mask: l.mask ? l.mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H) : null, maskOff: !!l.maskOff })) };
 }
 function restoreStruct(s) {
   const d = doc(); editVersion++;
-  d.layers = s.layers.map(o => { const l = makeLayer(o.name); Object.assign(l, { id: o.id, kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend }); if (o.vec) l.vec = clone(o.vec); l.ctx.putImageData(o.data, 0, 0); if (o.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).putImageData(o.mask, 0, 0); l.maskOff = !!o.maskOff; } return l; });
+  d.layers = s.layers.map(o => { const l = makeLayer(o.name); Object.assign(l, { id: o.id, kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, mirror: !!o.mirror, visible: o.visible, opacity: o.opacity, blend: o.blend }); if (o.vec) l.vec = clone(o.vec); l.ctx.putImageData(o.data, 0, 0); if (o.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).putImageData(o.mask, 0, 0); l.maskOff = !!o.maskOff; } return l; });
   d.maskEdit = s.maskEdit || null; d.activeId = s.activeId; d.groups = clone(s.groups || []); d.activeGroup = s.activeGroup || null; d.sel = new Set([d.activeId]); d.noSel = false;
 }
 function structOp(fn, label) { const before = snapStruct(); if (fn() === false) return; pushHistory({ t: 'st', label, before, after: snapStruct() }); rebuildLayers(); }
@@ -289,8 +319,9 @@ function commitOp(o) {
 function cancelOp() { if (op) { restoreOp(op); op = null; requestRender(); } }
 function snapCanvas(imageData) { const c = mkCanvas(); c.getContext('2d').putImageData(imageData, 0, 0); return c; }
 
-function addRecent(col) {
+function addRecent(col, save = true) {
   state.recent = [col, ...state.recent.filter(c => c !== col)].slice(0, 12);
+  if (save) try { localStorage.setItem('stitch-recent', JSON.stringify(state.recent)); } catch { /* storage unavailable */ }
   const box = $('#recent'); box.innerHTML = '';
   for (const c of state.recent) { const b = document.createElement('button'); b.style.background = c; b.title = c; b.onclick = () => setFg(c); box.appendChild(b); }
 }
@@ -588,10 +619,13 @@ function tintedTip(tip, color) {
   const c = mkCanvas(tip.width, tip.height), x = c.getContext('2d'); x.drawImage(tip, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height); return c;
 }
 function mirrorPoints(p) {
-  const m = state.tool === 'brush' ? state.brush.mirror : 'none'; if (m === 'none') return [p];
-  const r = currentRegion(), [bx, by, bw, bh] = r.id === 'all' ? [0, 0, W, H] : boundsOf(r.rects), cx = bx + bw / 2, cy = by + bh / 2;
-  const out = [p]; if (m === 'h' || m === 'both') out.push({ x: 2 * cx - p.x, y: p.y, pr: p.pr });
-  if (m === 'v' || m === 'both') out.push({ x: p.x, y: 2 * cy - p.y, pr: p.pr }); if (m === 'both') out.push({ x: 2 * cx - p.x, y: 2 * cy - p.y, pr: p.pr });
+  const m = state.tool === 'brush' ? state.brush.mirror : 'none', out = [p];
+  if (m !== 'none') {
+    const r = currentRegion(), [bx, by, bw, bh] = r.id === 'all' ? [0, 0, W, H] : boundsOf(r.rects), cx = bx + bw / 2, cy = by + bh / 2;
+    if (m === 'h' || m === 'both') out.push({ x: 2 * cx - p.x, y: p.y, pr: p.pr });
+    if (m === 'v' || m === 'both') out.push({ x: p.x, y: 2 * cy - p.y, pr: p.pr }); if (m === 'both') out.push({ x: 2 * cx - p.x, y: 2 * cy - p.y, pr: p.pr });
+  }
+  if (mirroring()) return out.flatMap(q => { const r = mirrorPt(q); return r ? [q, r] : [q]; });
   return out;
 }
 function stampAt(p) {
@@ -690,9 +724,15 @@ function pencilSeg(a, b) {
   let err = dx + dy;
   for (;;) { sctx.fillRect(x0 - o, y0 - o, s, s); if (x0 === x1 && y0 === y1) break; const e2 = 2 * err; if (e2 >= dy) { err += dy; x0 += sx; } if (e2 <= dx) { err += dx; y0 += sy; } }
 }
+// the same pencil line on the other side of a mirrored layer (mirrored by pixel centre, so it lands on whole pixels)
+function pencilMirrorSeg(a, b) {
+  const c = (q) => mirrorPt({ x: Math.floor(q.x) + .5, y: Math.floor(q.y) + .5 }), mb = c(b); if (!mb) return;
+  const ma = isTemplate() && faceAt(a.x, a.y) !== faceAt(b.x, b.y) ? null : c(a); // across a face edge the two ends land apart
+  pencilSeg(ma || mb, mb);
+}
 const pencilTool = {
-  down(p, e) { op = beginOp(); if (!op) return; addRecent(state.fg); sctx.clearRect(0, 0, W, H); const s = e.shiftKey && lastPoint ? lastPoint : p; pencilSeg(s, p); op.last = p; compositeOnto(op, strokeC, { alpha: state.opacity }); },
-  move(p) { if (!op) return; pencilSeg(op.last, p); op.last = p; compositeSoon(() => compositeOnto(op, strokeC, { alpha: state.opacity })); },
+  down(p, e) { op = beginOp(); if (!op) return; addRecent(state.fg); sctx.clearRect(0, 0, W, H); const s = e.shiftKey && lastPoint ? lastPoint : p; pencilSeg(s, p); if (mirroring()) pencilMirrorSeg(s, p); op.last = p; compositeOnto(op, strokeC, { alpha: state.opacity }); },
+  move(p) { if (!op) return; pencilSeg(op.last, p); if (mirroring()) pencilMirrorSeg(op.last, p); op.last = p; compositeSoon(() => compositeOnto(op, strokeC, { alpha: state.opacity })); },
   up() { if (!op) return; flushComposite(op); lastPoint = op.last; commitOp(op); op = null; },
 };
 
@@ -1208,6 +1248,7 @@ scroller.addEventListener('pointerdown', e => {
   if (state.tool === 'zoom' && e.button === 0) { setZoom(state.zoom * (e.altKey ? 1 / 1.25 : 1.25), { x: e.clientX, y: e.clientY }); return; }
   if (e.button === 1 || spaceDown || state.tool === 'hand') { pan = { x: e.clientX, y: e.clientY, sl: scroller.scrollLeft, st: scroller.scrollTop }; stack.classList.add('panning'); return; }
   if (e.button !== 0 || dlgOpen) return;
+  if (e.target === otherView) { setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); return; }
   const p = toPt(e), outside = p.x < 0 || p.y < 0 || p.x >= W || p.y >= H;
   if (outside && ['text', 'fill', 'eyedropper', 'gradient', 'brush', 'eraser', 'pencil'].includes(state.tool)) { if (textEdit) endTextEdit(); return; }
   if (e.altKey && ['brush', 'pencil', 'fill', 'rect', 'ellipse', 'line', 'gradient', 'text'].includes(state.tool)) { pickColor(p); return; }
@@ -1217,6 +1258,7 @@ scroller.addEventListener('pointerdown', e => {
 });
 scroller.addEventListener('pointermove', e => {
   if (pan) { scroller.scrollLeft = pan.sl - (e.clientX - pan.x); scroller.scrollTop = pan.st - (e.clientY - pan.y); return; }
+  if (!pointerDown && e.target === otherView) { hover = null; stack.style.cursor = ''; drawOverlay(); return; }
   const p = toPt(e); hover = p;
   const rg = regionAt(p.x, p.y, state.mode);
   $('#stPos').textContent = `${Math.floor(p.x)}, ${Math.floor(p.y)}`;
@@ -1345,6 +1387,11 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     const cp = colorPicker(cur, (c) => { p = { type: 'color', color: c }; emit(); sw.forEach(x => x.classList.remove('on')); });
     const sw = SWATCHES.slice(0, allowNone ? 11 : 12).map(c => { const b = el('button', 'fill-sw'); b.style.background = c; b.onclick = () => { p = { type: 'color', color: c }; cp.set(c); emit(); sw.forEach(x => x.classList.toggle('on', x === b)); }; return b; });
     pane.append(cp, grid([...(allowNone ? [noneBtn(() => { p = { type: 'none' }; emit(); })] : []), ...sw]));
+    if (state.recent.length) {
+      const lab = el('div', 'fill-label'); lab.textContent = 'Recent';
+      const rc = state.recent.map(c => { const b = el('button', 'fill-sw'); b.style.background = c; b.title = c; b.onclick = () => { p = { type: 'color', color: c }; cp.set(c); emit(); sw.forEach(x => x.classList.remove('on')); }; return b; });
+      pane.append(lab, grid(rc));
+    }
   }
   function gradPane() {
     if (p.type !== 'gradient') { const c = lastColor(); p = { type: 'gradient', kind: 'linear', angle: 0, stops: [{ pos: 0, color: c, alpha: 1 }, { pos: 1, color: '#ffffff', alpha: 1 }] }; emit(); }
@@ -2062,6 +2109,7 @@ function finishPath() {
   const pd = penDraw; if (!pd) return; penDraw = null; penHover = null;
   const sp = pd.l.vec.paths[pd.s];
   if (!sp || sp.pts.length < 2) { restoreStruct(pd.struct); rebuildLayers(); requestRender(); drawOverlay(); buildOptions(); return; }
+  if (pd.l.mirror) { const m = mirrorSub(sp); if (m) pd.l.vec.paths.push(m); } // Mirror on: a twin path on the other side, edited on its own
   renderPath(pd.l); pushHistory({ t: 'st', label: pd.added ? 'Add path' : 'Draw path', before: pd.struct, after: snapStruct() }); penSub = pd.s; penOwner = pd.l.id; penSel = -1; rebuildLayers(); buildOptions(); drawOverlay();
 }
 const penTool = {
@@ -2090,6 +2138,7 @@ const penTool = {
     const l = makeLayer('Path'); l.kind = 'Path';
     l.vec = { type: 'path', paths: [{ pts: [pt0], closed: false }], stroke: clone(state.pen.stroke), strokeW: state.pen.strokeW, fill: clone(state.pen.fill) };
     const a = activeLayer(); if (!d.noSel && a?.group) l.group = a.group;
+    if (!d.noSel && a?.mirror) l.mirror = true; // started from a mirrored layer: keep mirroring
     d.layers.splice(d.layers.indexOf(a) + 1, 0, l); d.activeId = l.id; d.noSel = false; d.activeGroup = null; d.sel = new Set([l.id]);
     penDraw = { l, struct, s: 0 }; penSub = 0; penOwner = l.id; op = { dragNew: 0 }; rebuildLayers(); buildOptions();
   },
@@ -2180,6 +2229,13 @@ function buildRegionSelect() {
 const eyeOn = '<svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 const eyeOff = '<svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3 3.8M6.2 6.2A17 17 0 0 0 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6"/></svg>';
 const lockSvg = '<svg viewBox="0 0 24 24"><rect x="6" y="11" width="12" height="9" rx="2"/><path d="M9 11V8a3 3 0 0 1 6 0v3"/></svg>';
+const mirrorSvg = '<svg viewBox="0 0 24 24"><path d="M12 3v18" stroke-dasharray="2 2"/><path d="M9 6L3 18h6z"/><path d="M15 6l6 12h-6z" fill="currentColor"/></svg>';
+const MIRROR_TIP = () => isTemplate() ? 'Mirror is on: strokes and paths on one arm, leg or half of the torso are also made on the other side' : 'Mirror is on: strokes and paths are also made flipped across the middle of the canvas';
+function toggleMirror(l = activeLayer()) {
+  if (!l || doc().activeGroup) { toast('Mirror goes on layers, not groups'); return; }
+  propChange(l, 'mirror', !l.mirror, l.mirror ? 'Mirror off' : 'Mirror on'); requestRender();
+  toast(`Mirror ${l.mirror ? 'on' : 'off'} for “${l.name}”`);
+}
 const folderSvg = '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 const thumbs = new Map();
 const groupOf = (l, d = doc()) => l.group ? (d.groups || []).find(g => g.id === l.group) : null;
@@ -2294,15 +2350,16 @@ function rebuildLayers() {
     }
     const info = el('div', 'info'); const name = el('div', 'name'); name.textContent = l.name; name.title = 'Double-click to rename';
     const sub = el('div', 'sub');
-    sub.textContent = (l.vec?.type === 'fill' ? 'Colour fill' + (l.vec.link && swatchById(l.vec.link) ? ' · ' + swatchById(l.vec.link).name : '') : l.kind) + (l.opacity < 1 ? ' · ' + Math.round(l.opacity * 100) + '%' : '') + (l.blend !== 'source-over' ? ' · ' + ($('#lyBlend').querySelector(`[value="${l.blend}"]`)?.textContent || l.blend) : '');
+    sub.textContent = (l.vec?.type === 'fill' ? 'Colour fill' + (l.vec.link && swatchById(l.vec.link) ? ' · ' + swatchById(l.vec.link).name : '') : l.kind) + (l.opacity < 1 ? ' · ' + Math.round(l.opacity * 100) + '%' : '') + (l.blend !== 'source-over' ? ' · ' + ($('#lyBlend').querySelector(`[value="${l.blend}"]`)?.textContent || l.blend) : '') + (l.mirror ? ' · Mirror on' : '');
     name.ondblclick = (ev) => { ev.stopPropagation(); renameInline(name, l.name, (v) => propChange(l, 'name', v, 'Rename layer')); };
     info.append(name, sub);
     const eye = el('button', 'eye', l.visible ? eyeOn : eyeOff); eye.title = 'Show / hide';
     eye.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'visible', !l.visible, 'Visibility'); };
     if (l.vec?.type === 'fill') { th.title = 'Double-click to change the colour'; th.ondblclick = (ev) => { ev.stopPropagation(); editFillLayerColour(l); }; }
-    const ths = mth ? [th, mth] : [th];
-    if (l.locked) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Locked - click to unlock'; lk.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'locked', false, 'Unlock layer'); }; row.append(...ths, info, lk, eye); }
-    else row.append(...ths, info, eye);
+    const ths = mth ? [th, mth] : [th], marks = [];
+    if (l.mirror) { const mb = el('button', 'eye mirror', mirrorSvg); mb.title = MIRROR_TIP() + ' - click to turn it off'; mb.onclick = (ev) => { ev.stopPropagation(); toggleMirror(l); }; marks.push(mb); }
+    if (l.locked) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Locked - click to unlock'; lk.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'locked', false, 'Unlock layer'); }; marks.push(lk); }
+    row.append(...ths, info, ...marks, eye);
     row.onclick = (e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey && l.id !== d.activeId) d.maskEdit = null; selectLayer(l, e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : null); };
     rowDnD(row, { layer: l }); list.appendChild(row);
   }
@@ -2381,7 +2438,7 @@ function addLayer(name) {
 }
 function copyLayer(a, nameSuffix = ' copy') {
   const l = makeLayer(a.name + nameSuffix);
-  Object.assign(l, { opacity: a.opacity, blend: a.blend, visible: a.visible, kind: a.kind, locked: a.locked, group: a.group || null }); if (a.vec) l.vec = clone(a.vec); l.ctx.drawImage(a.canvas, 0, 0);
+  Object.assign(l, { opacity: a.opacity, blend: a.blend, visible: a.visible, kind: a.kind, locked: a.locked, mirror: !!a.mirror, group: a.group || null }); if (a.vec) l.vec = clone(a.vec); l.ctx.drawImage(a.canvas, 0, 0);
   if (a.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(a.mask, 0, 0); l.maskOff = !!a.maskOff; }
   return l;
 }
@@ -2524,10 +2581,19 @@ function setMode(m) {
   cancelOp(); state.mode = m; document.body.classList.toggle('canvas-mode', m === 'canvas');
   $('#btnExport').title = m === 'canvas' ? 'Export the canvas as a PNG (Ctrl+E)' : 'Export the current template as a 585×559 PNG (Ctrl+E)';
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
+  otherView.classList.toggle('before', m === 'pants'); otherView.title = m === 'pants' ? 'Shirt - click to edit it' : 'Pants - click to edit them';
   if (!regionsFor(m).some(r => r.id === state.region)) state.region = 'all';
   buildRegionSelect(); rebuildLayers(); changed();
 }
 $$('.tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
+function setPair(v) {
+  pairPref = v; try { localStorage.setItem('stitch-pair', v ? '1' : '0'); } catch { /* storage unavailable */ }
+  document.body.classList.toggle('pair-view', v); $('#btnPair').classList.toggle('on', v);
+  $('#btnPair').title = v ? 'Show only the part you are editing' : 'Show shirt and pants side by side';
+  requestRender(); requestAnimationFrame(zoomFit);
+}
+$('#btnPair').onclick = () => setPair(!pairPref);
+document.body.classList.toggle('pair-view', pairPref); $('#btnPair').classList.toggle('on', pairPref);
 $$('#rigSeg button').forEach(b => b.onclick = () => { $$('#rigSeg button').forEach(x => x.classList.toggle('on', x === b)); preview?.setRig(b.dataset.rig); });
 $('#skinCol').oninput = () => preview?.setSkin($('#skinCol').value);
 const syncShow = () => preview?.setShow($('#showShirt').checked, $('#showPants').checked);
@@ -2625,7 +2691,7 @@ function serializeSet(set) {
   const out = { app: 'stitch-studio', version: 1, kind: set.kind || 'template', width: set.w || TW, height: set.h || TH, name: set.name, mode: set.mode, docs: {}, swatches: set.swatches };
   for (const k of Object.keys(set.docs)) {
     const d = set.docs[k];
-    out.docs[k] = { active: d.layers.findIndex(l => l.id === d.activeId), counter: d.counter, groups: d.groups || [], layers: d.layers.map(l => ({ name: l.name, kind: l.kind, vec: l.vec || null, group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, png: l.canvas.toDataURL('image/png'), ...(l.mask ? { mask: l.mask.toDataURL('image/png'), maskOff: !!l.maskOff } : {}) })) };
+    out.docs[k] = { active: d.layers.findIndex(l => l.id === d.activeId), counter: d.counter, groups: d.groups || [], layers: d.layers.map(l => ({ name: l.name, kind: l.kind, vec: l.vec || null, group: l.group || null, locked: !!l.locked, ...(l.mirror ? { mirror: true } : {}), visible: l.visible, opacity: l.opacity, blend: l.blend, png: l.canvas.toDataURL('image/png'), ...(l.mask ? { mask: l.mask.toDataURL('image/png'), maskOff: !!l.maskOff } : {}) })) };
   }
   return out;
 }
@@ -2659,7 +2725,7 @@ async function fillDocs(set, data) {
     const src = data.docs?.[k]; if (!src) continue;
     const d = newDoc(k, set.w, set.h); d.layers = []; d.counter = src.counter || src.layers.length;
     for (const o of src.layers) {
-      const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend });
+      const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, mirror: !!o.mirror, visible: o.visible, opacity: o.opacity, blend: o.blend });
       const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0);
       if (o.mask) { const mi = new Image(); mi.src = o.mask; await mi.decode(); l.mask = mkCanvas(set.w, set.h); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(mi, 0, 0); l.maskOff = !!o.maskOff; } if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') { await loadFillMask(o.vec.mask, set.w, set.h); renderFill(l); } if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
     }
@@ -2798,10 +2864,12 @@ const COMMANDS = [
   { id: 'layerUp', group: 'Layers', label: 'Move layer up', key: 'Ctrl+]', run: () => $('#lyUp').click() },
   { id: 'layerDown', group: 'Layers', label: 'Move layer down', key: 'Ctrl+[', run: () => $('#lyDown').click() },
   { id: 'lock', group: 'Layers', label: 'Lock / unlock layer', key: 'Ctrl+/', run: toggleLock },
+  { id: 'mirror', group: 'Layers', label: 'Mirror on / off', key: 'Shift+M', run: () => toggleMirror() },
   { id: 'zoomIn', group: 'View', label: 'Zoom in', key: '=', also: ['+'], run: () => setZoom(state.zoom * 1.25) },
   { id: 'zoomOut', group: 'View', label: 'Zoom out', key: '-', run: () => setZoom(state.zoom / 1.25) },
   { id: 'zoomFit', group: 'View', label: 'Fit to window', key: '0', also: ['Ctrl+0'], run: zoomFit },
   { id: 'zoom100', group: 'View', label: 'Actual size', key: '1', run: () => setZoom(1) },
+  { id: 'pairView', group: 'View', label: 'Shirt and pants side by side', key: '', run: () => { if (isTemplate()) setPair(!pairPref); } },
   { id: 'toggleMode', group: 'View', label: 'Switch Shirt / Pants', key: 'Tab', run: () => { if (isTemplate()) setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); } },
   { id: 'shortcuts', group: 'View', label: 'Keyboard shortcuts', key: '?', run: () => openShortcuts() },
   { id: 'newProject', group: 'Files', label: 'New project', key: 'Ctrl+N', run: () => openNewProjectDialog() },
@@ -2822,7 +2890,7 @@ const FIXED_KEYS = [
 ];
 const RESERVED = new Set(['Ctrl+V', 'Space', 'Escape', 'Enter', 'F11', 'F12', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Shift+ArrowLeft', 'Shift+ArrowRight', 'Shift+ArrowUp', 'Shift+ArrowDown']);
 let keyOverrides = null; // read at boot (rebuildKeyMap), once the storage helpers exist
-const keysOf = (c) => c.id in keyOverrides ? (keyOverrides[c.id] ? [keyOverrides[c.id]] : []) : [c.key, ...(c.also || [])];
+const keysOf = (c) => c.id in keyOverrides ? (keyOverrides[c.id] ? [keyOverrides[c.id]] : []) : [c.key, ...(c.also || [])].filter(Boolean); // a command may start with no key
 const keyOf = (id) => { const c = COMMANDS.find(x => x.id === id); return c ? keysOf(c)[0] || '' : ''; };
 let keyMap = new Map();
 function rebuildKeyMap() { keyOverrides ??= store.get('stitch-keys') || {}; keyMap = new Map(); for (const c of COMMANDS) for (const k of keysOf(c)) if (!keyMap.has(k)) keyMap.set(k, c); refreshKeyHints(); }
@@ -3398,6 +3466,7 @@ const MENUS = [
     { label: 'Group layers', key: 'Ctrl+G', run: groupLayers },
     { label: 'Ungroup', key: 'Ctrl+Shift+G', run: ungroupLayers, off: () => !doc().activeGroup && !activeLayer().group },
     { label: 'Lock / unlock layer', key: 'Ctrl+/', run: () => { const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); } },
+    { label: 'Mirror on / off', run: () => toggleMirror(), off: () => !!doc().activeGroup },
     { label: 'Rasterize layer', run: () => { const l = activeLayer(); endTextEdit(); flushVecEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); }, off: () => !activeLayer().vec },
     '-',
     { label: 'Merge down', key: 'Ctrl+M', run: () => $('#lyMerge').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
@@ -3439,7 +3508,7 @@ const MENUS = [
 ];
 // which command each menu entry runs, so the menus show the keys the user picked
 const MENU_CMDS = { 'New project…': 'newProject', 'Open (.stitch, Pixlr .pxz or image)…': 'open', 'Save project (.stitch)…': 'save', 'Import image as layer…': 'import', 'Export PNG…': 'exportPng', 'Export set (shirt + pants)…': 'exportSet',
-  'New layer': 'newLayer', 'Duplicate layer': 'dup', 'Rename layer': 'rename', 'Delete layer': 'delete', 'Group layers': 'group', 'Ungroup': 'ungroup', 'Lock / unlock layer': 'lock', 'Merge down': 'merge', 'Merge visible': 'mergeVisible',
+  'New layer': 'newLayer', 'Duplicate layer': 'dup', 'Rename layer': 'rename', 'Delete layer': 'delete', 'Group layers': 'group', 'Ungroup': 'ungroup', 'Lock / unlock layer': 'lock', 'Mirror on / off': 'mirror', 'Merge down': 'merge', 'Merge visible': 'mergeVisible',
   'Bring forward / up': 'layerUp', 'Send backward / down': 'layerDown', 'Select all': 'selectAll', 'Deselect': 'deselect', 'Invert selection': 'invert', 'Copy': 'copy', 'Cut': 'cut', 'Delete selected pixels': 'delete' };
 for (const m of MENUS) for (const it of m.items) if (it !== '-' && MENU_CMDS[it.label]) it.cmd = MENU_CMDS[it.label];
 
@@ -3720,6 +3789,7 @@ function openLayerPop(item, x, y) {
   box.append(opac);
   const seg2 = (a, b, get, set) => { const g = el('div', 'lp-seg'); for (const [v, t] of [[false, a], [true, b]]) { const btn = el('button', get() === v ? 'on' : ''); btn.textContent = t; btn.onclick = () => { set(v); g.querySelectorAll('button').forEach((x, i) => x.classList.toggle('on', (i === 1) === get())); }; g.append(btn); } return g; };
   if (!isG) box.append(seg2('Unlocked', 'Locked', () => !!obj.locked, (v) => propChange(obj, 'locked', v, v ? 'Lock layer' : 'Unlock layer')));
+  if (!isG) { const ms = seg2('Mirror off', 'Mirror on', () => !!obj.mirror, (v) => { if (!!obj.mirror !== v) toggleMirror(obj); }); ms.title = MIRROR_TIP().replace('Mirror is on: ', 'While on, ') + '. Turning it off keeps what was mirrored.'; box.append(ms); }
   box.append(seg2('Visible', 'Hidden', () => isG ? obj.visible === false : !obj.visible, (v) => { if (isG) structOp(() => { obj.visible = !v; }, 'Group visibility'); else propChange(obj, 'visible', !v, 'Visibility'); }));
   const foot = el('div', 'lp-foot');
   const fb = (svg, title, fn, off) => { const b = el('button', 'lp-btn', svg); b.title = title; b.disabled = !!off; b.onclick = () => { closeLayerPop(); fn(); }; return b; };
@@ -4192,7 +4262,10 @@ function showWhatsNew(ver, items) {
   for (const s of state.sets) s.dirty = false; // just loaded - nothing to save yet
   sessionReady = true; saveDirty();
   requestAnimationFrame(zoomFit);
-  addRecent('#d23c3c'); addRecent('#1f2a44'); addRecent('#ffffff'); addRecent('#111111');
+  // recent colours are remembered between launches; a first launch starts with a few
+  let recent = null; try { recent = JSON.parse(localStorage.getItem('stitch-recent')); } catch { /* none saved */ }
+  recent = Array.isArray(recent) ? recent.filter(c => /^#[0-9a-f]{6}$/i.test(c)) : [];
+  for (const c of (recent.length ? recent : ['#111111', '#ffffff', '#1f2a44', '#d23c3c']).reverse()) addRecent(c, false);
   await showHome();
   maybeShowWhatsNew(hadData);
 })();window.__stitchDebug = () => { const d = doc(); return { tool: state.tool, activeId: d.activeId, activeGroup: d.activeGroup, noSel: d.noSel, groups: d.groups, layers: d.layers.map(l => [l.name, l.group, l.locked, l.vec ? { type: l.vec.type, x: l.vec.x, y: l.vec.y, w: l.vec.w, h: l.vec.h, size: l.vec.size, flipX: !!l.vec.flipX, fill: l.vec.fill?.color } : null]), ub: d.activeGroup ? unionBounds(groupMembers(d.activeGroup)) : null }; };
