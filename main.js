@@ -100,10 +100,62 @@ ipcMain.handle('projects-list', async () => {
 ipcMain.handle('project-read', async (e, id) => { try { return await fs.readFile(projFile(id, '.stitch'), 'utf8'); } catch { return null; } });
 ipcMain.handle('project-write', async (e, id, data, meta) => {
   await fs.mkdir(projDir(), { recursive: true });
+  await snapshot(id).catch(err => console.error('snapshot failed', err)); // keeps the copy being replaced, if the last one is old enough
+  // the folder a project sits in is only set from Home, so a normal save keeps it
+  if (!('folder' in meta)) { try { const old = JSON.parse(await fs.readFile(projFile(id, '.json'), 'utf8')); if (old.folder) meta = { ...meta, folder: old.folder }; } catch { /* new project */ } }
   await writeAtomic(projFile(id, '.stitch'), data); await writeAtomic(projFile(id, '.json'), JSON.stringify(meta));
   return true;
 });
-ipcMain.handle('project-delete', async (e, id) => { for (const ext of ['.stitch', '.json']) await fs.rm(projFile(id, ext), { force: true }); return true; });
+ipcMain.handle('project-delete', async (e, id) => { for (const ext of ['.stitch', '.json']) await fs.rm(projFile(id, ext), { force: true }); await fs.rm(verDir(id), { recursive: true, force: true }); return true; });
+ipcMain.handle('project-set-folder', async (e, id, folder) => {
+  const f = projFile(id, '.json'), meta = JSON.parse(await fs.readFile(f, 'utf8'));
+  if (folder) meta.folder = String(folder).slice(0, 60); else delete meta.folder;
+  await writeAtomic(f, JSON.stringify(meta)); return true;
+});
+
+// Version history: projects/<id>.versions/<time>.stitch.gz are earlier copies of the project, taken when a save
+// replaces a copy at least 10 minutes old. Older copies are thinned out (one per hour after a day... see keepVersions)
+// and each project keeps at most 20 copies / 60 MB, so history never grows without limit.
+const verDir = (id) => projFile(id, '.versions');
+const VERSION_GAP = 10 * 60e3, MAX_VERSIONS = 20, MAX_VERSION_BYTES = 60e6;
+async function listVersions(id) {
+  let names = []; try { names = await fs.readdir(verDir(id)); } catch { return []; }
+  const out = [];
+  for (const n of names) { const m = /^(\d+)\.stitch\.gz$/.exec(n); if (!m) continue; try { out.push({ file: n, time: +m[1], size: (await fs.stat(path.join(verDir(id), n))).size }); } catch { /* gone */ } }
+  return out.sort((a, b) => b.time - a.time);
+}
+async function snapshot(id, force) {
+  const src = projFile(id, '.stitch');
+  let st; try { st = await fs.stat(src); } catch { return false; }
+  const list = await listVersions(id);
+  if (!force && list[0] && st.mtimeMs - list[0].time < VERSION_GAP) return false;
+  if (list.some(v => v.time === Math.floor(st.mtimeMs))) return false; // this exact copy is already kept
+  await fs.mkdir(verDir(id), { recursive: true }); const buf = await fs.readFile(src);
+  const gz = await new Promise((res, rej) => zlib.gzip(buf, { level: 6 }, (err, out) => err ? rej(err) : res(out)));
+  await fs.writeFile(path.join(verDir(id), `${Math.floor(st.mtimeMs)}.stitch.gz`), gz);
+  await keepVersions(id);
+  return true;
+}
+// newest first: everything from the last hour, then one per hour for a day, then one per day; then the count and size caps
+async function keepVersions(id) {
+  const list = await listVersions(id), now = Date.now(), keep = [];
+  for (const v of list) {
+    const age = now - v.time, gap = age < 3600e3 ? 0 : age < 86400e3 ? 3600e3 : 86400e3, prev = keep[keep.length - 1];
+    if (!prev || prev.time - v.time >= gap) keep.push(v);
+  }
+  while (keep.length > MAX_VERSIONS) keep.pop();
+  let total = keep.reduce((s, v) => s + v.size, 0);
+  while (keep.length > 2 && total > MAX_VERSION_BYTES) total -= keep.pop().size;
+  const names = new Set(keep.map(v => v.file));
+  for (const v of list) if (!names.has(v.file)) await fs.rm(path.join(verDir(id), v.file), { force: true });
+}
+ipcMain.handle('project-versions', (e, id) => listVersions(id));
+ipcMain.handle('project-snapshot', (e, id) => snapshot(id, true));
+ipcMain.handle('project-version-read', async (e, id, file) => {
+  if (!/^\d+\.stitch\.gz$/.test(String(file))) throw new Error('bad version');
+  const buf = await fs.readFile(path.join(verDir(id), file));
+  return await new Promise((res, rej) => zlib.gunzip(buf, (err, out) => err ? rej(err) : res(out.toString('utf8'))));
+});
 
 // Live updates: when files in the app folder change, save + reload the window (or relaunch if main/preload changed).
 let updTimer = null, needRelaunch = false;

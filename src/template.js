@@ -70,3 +70,58 @@ export function boundsOf(rects) {
   for (const [x, y, w, h] of rects) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h); }
   return [x0, y0, x1 - x0, y1 - y0];
 }
+
+// Unit-box face corners (TL, TR, BR, BL as they sit in the template rect) + normals, shared with the 3D preview.
+// Character faces +Z; its right side is -X.
+export const FACES = {
+  F: { c: [[-1, 1, 1], [1, 1, 1], [1, -1, 1], [-1, -1, 1]], n: [0, 0, 1] },
+  B: { c: [[1, 1, -1], [-1, 1, -1], [-1, -1, -1], [1, -1, -1]], n: [0, 0, -1] },
+  R: { c: [[-1, 1, -1], [-1, 1, 1], [-1, -1, 1], [-1, -1, -1]], n: [-1, 0, 0] },
+  L: { c: [[1, 1, 1], [1, 1, -1], [1, -1, -1], [1, -1, 1]], n: [1, 0, 0] },
+  U: { c: [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]], n: [0, 1, 0] },
+  D: { c: [[-1, -1, 1], [1, -1, 1], [1, -1, -1], [-1, -1, -1]], n: [0, -1, 0] },
+};
+
+// Seams: face edges that meet on the 3D body but sit apart on the template.
+// Each edge: p0 -> p1 in template px, n = inward normal. Walking a's edge from p0 to p1 walks b's from p1 to p0.
+function faceEdges(rect) {
+  const [x, y, w, h] = rect;
+  return [
+    { p0: [x, y], p1: [x + w, y], n: [0, 1] },
+    { p0: [x + w, y], p1: [x + w, y + h], n: [-1, 0] },
+    { p0: [x + w, y + h], p1: [x, y + h], n: [0, -1] },
+    { p0: [x, y + h], p1: [x, y], n: [1, 0] },
+  ];
+}
+export const SEAMS = (() => {
+  const out = [], key = (v) => v.join(',');
+  for (const part of ['torso', 'right', 'left']) {
+    const list = [];
+    for (const k of FACE_ORDER) {
+      const c = FACES[k].c, rect = PARTS[part][k];
+      faceEdges(rect).forEach((e, i) => list.push({ part, face: k, rect, ...e, a3: key(c[i]), b3: key(c[(i + 1) % 4]) }));
+    }
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+      if (a.a3 === b.b3 && a.b3 === b.a3) out.push({ part, a, b });
+    }
+  }
+  return out;
+})();
+// every face edge with its partner, for looking up "what's across this edge"
+export const EDGES = SEAMS.flatMap(s => [{ e: s.a, o: s.b }, { e: s.b, o: s.a }]);
+
+// the point across the seam: p sits d px inside edge e at fraction s along it; the partner point sits d px outside o
+export function acrossSeam(e, o, p) {
+  const dx = e.p1[0] - e.p0[0], dy = e.p1[1] - e.p0[1], len2 = dx * dx + dy * dy;
+  const s = ((p.x - e.p0[0]) * dx + (p.y - e.p0[1]) * dy) / len2;
+  const d = (p.x - e.p0[0]) * e.n[0] + (p.y - e.p0[1]) * e.n[1];
+  const qx = o.p1[0] + (o.p0[0] - o.p1[0]) * s, qy = o.p1[1] + (o.p0[1] - o.p1[1]) * s;
+  return { x: qx - o.n[0] * d, y: qy - o.n[1] * d, s, d };
+}
+// the face rect (and its part) a template point is in
+export const ALL_FACES = ['torso', 'right', 'left'].flatMap(part => FACE_ORDER.map(face => ({ part, face, rect: PARTS[part][face] })));
+export function faceAt(x, y) {
+  for (const f of ALL_FACES) { const [rx, ry, rw, rh] = f.rect; if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) return f; }
+  return null;
+}

@@ -43,6 +43,7 @@
   <label class="opt" title="Show the Roblox template over your work, exactly as it will export (export always includes it)"><input type="checkbox" id="optUnderlay" checked> Template</label>
   <label class="opt"><input type="checkbox" id="optGuides" checked> Guides</label>
   <label class="opt"><input type="checkbox" id="optShade"> Dim unused</label>
+  <label class="opt" title="Show which edges join on the body, and mark in red where the colours on the two sides don't match"><input type="checkbox" id="optSeams"> Seams</label>
 </div>
 
 <main class="main">
@@ -101,7 +102,8 @@
           <label><input type="checkbox" id="showShirt" checked> Shirt</label>
           <label><input type="checkbox" id="showPants" checked> Pants</label>
           <label><input type="checkbox" id="autoRot"> Spin</label>
-          <button class="ph-icon" id="btnShot" title="Save the preview as a PNG"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
+          <button class="ph-icon" id="btnPaint3d" title="Paint on the model"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 8.4 14z"/><path d="M8 15c-2 0-4 1.5-4 4 0 .7-.4 1.3-1 1.5 4 .8 7-.6 7-3.5"/></svg></button>
+          <button class="ph-icon" id="btnShot" title="Save a preview image"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
         </div>
       </div>
     </section>
@@ -124,6 +126,7 @@
           <span class="grow"></span>
           <button class="ph-icon" id="lyUp" title="Move layer up"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
           <button class="ph-icon" id="lyDown" title="Move layer down"><svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+          <button class="ph-icon" id="lyMask" title="Add a mask - hide parts of the layer without erasing them"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4.5" fill="currentColor" stroke="none"/></svg></button>
           <button class="ph-icon" id="lyMerge" title="Merge down (Ctrl+M)"><svg viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4"/><path d="M5 19h14"/></svg></button>
           <button class="ph-icon" id="lyAdd" title="New layer (Ctrl+Shift+N)"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg></button>
           <button class="ph-icon" id="lyDup" title="Duplicate layer (Ctrl+J)"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/><path d="M14 11v6M11 14h6"/></svg></button>
@@ -201,9 +204,18 @@
       <button class="home-big" id="homeNew"><svg viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="28" rx="2"/><path d="M24 17v14M17 24h14"/></svg><span>Create new</span><small>Template or normal canvas</small></button>
       <button class="home-big" id="homeOpen"><svg viewBox="0 0 48 48"><path d="M6 14v24h36V18H24l-4-4z"/><path d="M24 34V23M19 27l5-5 5 5"/></svg><span>Open file</span><small>.stitch, Pixlr .pxz or an image</small></button>
     </div>
-    <h2 class="home-h">Projects</h2>
+    <div class="home-bar">
+      <h2 class="home-h">Projects</h2>
+      <div class="home-folders" id="homeFolders"></div>
+      <span class="home-grow"></span>
+      <div class="home-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><input type="search" id="homeSearch" placeholder="Search projects" spellcheck="false"></div>
+      <select id="homeSort" title="Sort projects">
+        <option value="updated">Last edited</option><option value="name">Name</option><option value="created">Newest</option><option value="oldest">Oldest</option>
+      </select>
+    </div>
     <div class="proj-grid" id="projGrid"></div>
     <p class="home-empty" id="homeEmpty" hidden>No projects yet. Create one, or drop an image or .stitch file anywhere on this page.</p>
+    <p class="home-empty" id="homeNone" hidden></p>
   </div>
   <div class="home-drop"><div>Drop to import</div></div>
 </div>

@@ -1,5 +1,16 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.7.0', notes: [
+    'Paint on the 3D model: turn on the brush button under the preview and paint straight onto the body with the Brush, Pencil, Eraser, Fill or Eyedropper. Right-drag turns the model.',
+    'Seams: tick Seams to see which edges join on the body and where the colours don’t match. The Brush and Eraser can wrap strokes over an edge onto the face it joins (Wrap seams).',
+    'Save preview image now makes clean pictures for your store: front, back, both side by side, three-quarter or side views, at up to 2048 px, on a transparent or coloured background.',
+    'Layer masks: hide parts of a layer without erasing them. Click the mask button under the layers, then paint black to hide and white to bring it back. Works on text and shapes too.',
+    'Version history: earlier copies of each project are kept as you work. Restore one, or open it as a new project, from the clock button on a project or File → Version history.',
+    'Home: search your projects, sort them, and sort them into folders (drag a project onto a folder).',
+    'Keyboard shortcuts: press ? (or Help → Keyboard shortcuts) to see them all, and click one to change it.',
+    'The 3D preview updates much faster, so painting on templates is smoother.',
+    'Colour windows only open once, the colour picker’s circle is round, and going to Home closes any open editor windows.',
+  ] },
   { version: '0.6.1', notes: [
     'Long brush and pencil strokes no longer lag.',
     'Painting on text or a shape offers to paint on a new layer above it instead.',

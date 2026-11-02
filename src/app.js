@@ -1,4 +1,4 @@
-import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf } from './template.js';
+import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, SEAMS, EDGES, acrossSeam, faceAt } from './template.js';
 import { CHANGELOG } from './changelog.js';
 import { createPreview } from './preview.js';
 
@@ -32,7 +32,7 @@ const state = {
   tool: 'brush', fg: '#d23c3c', bg: '#ffffff',
   size: 6, opacity: 1, hardEraser: false, fillShape: false, tolerance: 24, sampleAll: false, gradTransparent: false,
   font: 'Arial', fontSize: 24, bold: false,
-  region: 'all', underlay: true, guides: true, shade: false, zoom: 1, recent: [],
+  region: 'all', underlay: true, guides: true, shade: false, seams: false, zoom: 1, recent: [],
 };
 const doc = () => state.docs[state.mode];
 const activeLayer = () => doc().layers.find(l => l.id === doc().activeId) || doc().layers[doc().layers.length - 1];
@@ -49,6 +49,30 @@ const templateImg = new Image(); templateImg.src = 'default-template.png'; templ
 const templateReady = () => templateImg.complete && templateImg.naturalWidth > 0;
 
 const grpC = mkCanvas(), grpX = grpC.getContext('2d');
+// ---- layer masks: l.mask is a grey picture the size of the layer. White shows the layer, black hides it,
+// grey partly hides it, and anything never painted counts as white. l.maskOff turns it off without deleting it.
+function maskAlpha(l) { // the mask as an alpha channel, rebuilt only after the mask changes
+  const m = l.mask;
+  if (!l._ma || l._ma.width !== m.width || l._ma.height !== m.height) { l._ma = mkCanvas(m.width, m.height); l._maDirty = true; }
+  if (l._maDirty !== false) {
+    const id = m.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, m.width, m.height), d = id.data;
+    for (let i = 0; i < d.length; i += 4) { const a = d[i + 3]; d[i + 3] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) * a / 65280 + 255 - a; d[i] = d[i + 1] = d[i + 2] = 0; }
+    l._ma.getContext('2d').putImageData(id, 0, 0); l._maDirty = false;
+  }
+  return l._ma;
+}
+let maskScratch = null;
+// what a layer adds to the picture: its pixels, cut by its mask (the result is only good until the next call)
+function layerSource(l) {
+  if (!l.mask || l.maskOff) return l.canvas;
+  const w = l.canvas.width, h = l.canvas.height;
+  if (!maskScratch || maskScratch.width !== w || maskScratch.height !== h) maskScratch = mkCanvas(w, h);
+  const x = maskScratch.getContext('2d'); x.globalCompositeOperation = 'source-over'; x.globalAlpha = 1; x.clearRect(0, 0, w, h);
+  x.drawImage(l.canvas, 0, 0); x.globalCompositeOperation = 'destination-in'; x.drawImage(maskAlpha(l), 0, 0); x.globalCompositeOperation = 'source-over';
+  return maskScratch;
+}
+function newMask(w, h, fill = '#fff') { const c = mkCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true }); x.fillStyle = fill; x.fillRect(0, 0, w, h); return c; }
+const maskEditing = (l, d = doc()) => !!l?.mask && d.maskEdit === l.id && !d.noSel;
 // draws a list of layers onto ctx c; layers in a group are flattened on their own first, so blend modes
 // like "clip to below" or "erase" inside a group only affect the rest of that group
 function compositeLayers(c, layers, groups) {
@@ -59,12 +83,12 @@ function compositeLayers(c, layers, groups) {
       let j = i; while (j < layers.length && layers[j].group === gid) j++;
       if (g.visible !== false && (g.opacity ?? 1) > 0) {
         const tc = mkCanvas(c.canvas.width, c.canvas.height), tx = tc.getContext('2d');
-        for (let k = i; k < j; k++) { const m = layers[k]; if (!m.visible || m.opacity <= 0) continue; tx.globalAlpha = m.opacity; tx.globalCompositeOperation = m.blend; tx.drawImage(m.canvas, 0, 0); }
+        for (let k = i; k < j; k++) { const m = layers[k]; if (!m.visible || m.opacity <= 0) continue; tx.globalAlpha = m.opacity; tx.globalCompositeOperation = m.blend; tx.drawImage(layerSource(m), 0, 0); }
         c.globalAlpha = g.opacity ?? 1; c.globalCompositeOperation = 'source-over'; c.drawImage(tc, 0, 0);
       }
       i = j; continue;
     }
-    if (l.visible && l.opacity > 0) { c.globalAlpha = l.opacity; c.globalCompositeOperation = l.blend; c.drawImage(l.canvas, 0, 0); }
+    if (l.visible && l.opacity > 0) { c.globalAlpha = l.opacity; c.globalCompositeOperation = l.blend; c.drawImage(layerSource(l), 0, 0); }
     i++;
   }
   c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
@@ -78,6 +102,7 @@ let renderQueued = false;
 function requestRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); } }
 function render() {
   renderQueued = false;
+  for (const o of [op, adjOp]) if (o?.maskOf) o.maskOf._maDirty = true; // a mask is being painted
   const tpl = isTemplate();
   if (tpl) { compositeDoc(state.docs.shirt); compositeDoc(state.docs.pants); } else compositeDoc(doc());
   vctx.clearRect(0, 0, W, H);
@@ -116,12 +141,66 @@ function drawOverlay() {
     const limb = state.mode === 'pants' ? 'LEG' : 'ARM';
     lbl('TORSO', 168, 20); lbl('RIGHT ' + limb, 22, 300); lbl('LEFT ' + limb, 377, 300);
   }
+  if (state.seams && isTemplate()) drawSeams(o);
   const cur = currentRegion();
   if (cur.id !== 'all') {
     o.lineWidth = dpx(1.5); o.strokeStyle = '#ffb84d';
     for (const r of cur.rects) o.strokeRect(r[0] + .75, r[1] + .75, r[2] - 1.5, r[3] - 1.5);
   }
   drawToolOverlay(o);
+}
+
+// ------------------------------------------------------------------ seams (edges that meet on the body)
+// Seam check marks, in red, every stretch of a seam where the colours on the two sides don't match
+let seamCache = null;
+function seamMismatches() {
+  const key = state.mode + '|' + editVersion + '|' + state.setIdx;
+  if (seamCache && seamCache.key === key) return seamCache;
+  const d = doc(); compositeDoc(d); const px = d.comp.getContext('2d').getImageData(0, 0, W, H).data;
+  const at = (x, y) => (Math.min(H - 1, Math.max(0, Math.floor(y))) * W + Math.min(W - 1, Math.max(0, Math.floor(x)))) * 4;
+  const differ = (i, j) => {
+    const a1 = px[i + 3], a2 = px[j + 3]; if (a1 < 16 && a2 < 16) return false;
+    if (Math.abs(a1 - a2) > 64) return true;
+    return Math.max(Math.abs(px[i] - px[j]), Math.abs(px[i + 1] - px[j + 1]), Math.abs(px[i + 2] - px[j + 2])) > 48;
+  };
+  const runs = []; let bad = 0;
+  for (const sm of SEAMS) {
+    const { a, b } = sm, len = Math.round(Math.hypot(a.p1[0] - a.p0[0], a.p1[1] - a.p0[1])); let start = -1, any = false;
+    const flush = (i) => { if (start < 0) return; runs.push({ a, b, s0: start / len, s1: i / len }); start = -1; any = true; };
+    for (let i = 0; i < len; i++) {
+      const s = (i + .5) / len;
+      const ax = a.p0[0] + (a.p1[0] - a.p0[0]) * s + a.n[0] * .5, ay = a.p0[1] + (a.p1[1] - a.p0[1]) * s + a.n[1] * .5;
+      const bx = b.p1[0] + (b.p0[0] - b.p1[0]) * s + b.n[0] * .5, by = b.p1[1] + (b.p0[1] - b.p1[1]) * s + b.n[1] * .5;
+      if (differ(at(ax, ay), at(bx, by))) { if (start < 0) start = i; } else flush(i);
+    }
+    flush(len); if (any) bad++;
+  }
+  return (seamCache = { key, runs, bad });
+}
+const seamPt = (e, s) => [e.p0[0] + (e.p1[0] - e.p0[0]) * s, e.p0[1] + (e.p1[1] - e.p0[1]) * s];
+function drawSeams(o) {
+  const { runs } = seamMismatches();
+  o.save(); o.lineCap = 'butt'; o.lineWidth = dpx(3); o.strokeStyle = 'rgba(255,60,60,.95)'; o.beginPath();
+  for (const r of runs) {
+    // a's stretch runs s0 -> s1; on b the same stretch runs backwards
+    o.moveTo(...seamPt(r.a, r.s0)); o.lineTo(...seamPt(r.a, r.s1));
+    o.moveTo(...seamPt(r.b, 1 - r.s0)); o.lineTo(...seamPt(r.b, 1 - r.s1));
+  }
+  o.stroke();
+  // hovering near an edge shows the edge it joins
+  const f = hover && faceAt(hover.x, hover.y);
+  if (f) {
+    let best = null;
+    for (const { e, o: other } of EDGES) if (e.part === f.part && e.face === f.face) { const q = acrossSeam(e, other, hover); if (q.d >= 0 && (!best || q.d < best.d)) best = { e, other, d: q.d }; }
+    if (best && best.d <= Math.max(6, dpx(14))) {
+      o.lineWidth = dpx(2.5); o.strokeStyle = '#ff4fd8'; o.setLineDash([]);
+      for (const e of [best.e, best.other]) { o.beginPath(); o.moveTo(...e.p0); o.lineTo(...e.p1); o.stroke(); }
+      // arrows show which way round they join: the start of one edge meets the end of the other
+      o.fillStyle = '#ff4fd8'; const dot = (p) => { o.beginPath(); o.arc(p[0], p[1], dpx(3.5), 0, Math.PI * 2); o.fill(); };
+      dot(best.e.p0); dot(best.other.p1);
+    }
+  }
+  o.restore();
 }
 
 // ------------------------------------------------------------------ zoom & pan
@@ -169,12 +248,12 @@ function pushHistory(entry) {
 function pushPixels(layer, before, vb) { const e = { t: 'px', id: layer.id, before, after: layer.ctx.getImageData(0, 0, W, H) }; if (vb !== undefined || layer.vec) { e.vb = clone(vb); e.va = clone(layer.vec); } pushHistory(e); }
 function snapStruct() {
   const d = doc();
-  return { activeId: d.activeId, activeGroup: d.activeGroup || null, groups: clone(d.groups || []), layers: d.layers.map(l => ({ id: l.id, name: l.name, kind: l.kind, vec: clone(l.vec), group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, data: l.ctx.getImageData(0, 0, W, H) })) };
+  return { activeId: d.activeId, activeGroup: d.activeGroup || null, maskEdit: d.maskEdit || null, groups: clone(d.groups || []), layers: d.layers.map(l => ({ id: l.id, name: l.name, kind: l.kind, vec: clone(l.vec), group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, data: l.ctx.getImageData(0, 0, W, H), mask: l.mask ? l.mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H) : null, maskOff: !!l.maskOff })) };
 }
 function restoreStruct(s) {
   const d = doc(); editVersion++;
-  d.layers = s.layers.map(o => { const l = makeLayer(o.name); Object.assign(l, { id: o.id, kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend }); if (o.vec) l.vec = clone(o.vec); l.ctx.putImageData(o.data, 0, 0); return l; });
-  d.activeId = s.activeId; d.groups = clone(s.groups || []); d.activeGroup = s.activeGroup || null; d.sel = new Set([d.activeId]); d.noSel = false;
+  d.layers = s.layers.map(o => { const l = makeLayer(o.name); Object.assign(l, { id: o.id, kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend }); if (o.vec) l.vec = clone(o.vec); l.ctx.putImageData(o.data, 0, 0); if (o.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).putImageData(o.mask, 0, 0); l.maskOff = !!o.maskOff; } return l; });
+  d.maskEdit = s.maskEdit || null; d.activeId = s.activeId; d.groups = clone(s.groups || []); d.activeGroup = s.activeGroup || null; d.sel = new Set([d.activeId]); d.noSel = false;
 }
 function structOp(fn, label) { const before = snapStruct(); if (fn() === false) return; pushHistory({ t: 'st', label, before, after: snapStruct() }); rebuildLayers(); }
 function propChange(layer, key, value, label) {
@@ -183,7 +262,8 @@ function propChange(layer, key, value, label) {
 }
 function applyEntry(e, key) {
   editVersion++;
-  if (e.t === 'px') { const l = doc().layers.find(x => x.id === e.id); if (l) { l.ctx.putImageData(e[key], 0, 0); if ('va' in e) { const v = clone(key === 'before' ? e.vb : e.va); if (v) l.vec = v; else delete l.vec; } } }
+  if (e.t === 'px' && e.m) { const l = doc().layers.find(x => x.id === e.id); if (l?.mask) { l.mask.getContext('2d').putImageData(e[key], 0, 0); l._maDirty = true; } }
+  else if (e.t === 'px') { const l = doc().layers.find(x => x.id === e.id); if (l) { l.ctx.putImageData(e[key], 0, 0); if ('va' in e) { const v = clone(key === 'before' ? e.vb : e.va); if (v) l.vec = v; else delete l.vec; } } }
   else if (e.t === 'sw') { const s = swatchById(e.id); if (s) { s.paint = clone(e[key]); rerenderFills(); } }
   else if (e.t === 'swo') { const ids = e[key]; state.swatches.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); renderSwatches(); scheduleAutosave(); }
   else if (e.t === 'prop') { const l = doc().layers.find(x => x.id === e.id); if (l) l[e.key] = e[key]; }
@@ -242,6 +322,10 @@ function beginOp(opts = {}) {
   if (doc().noSel) { doc().noSel = false; rebuildLayers(); }
   if (!layerVisible(l)) { toast('The active layer is hidden'); return null; }
   if (l.locked) { toast(`“${l.name}” is locked - click its lock icon to unlock it`); return null; }
+  if (maskEditing(l) && !opts.vec && state.tool !== 'move') {
+    const mx = l.mask.getContext('2d', { willReadFrequently: true });
+    return { l: { id: l.id, name: l.name, canvas: l.mask, ctx: mx, visible: true }, before: mx.getImageData(0, 0, W, H), maskOf: l };
+  }
   if (l.vec?.type === 'fill' && !opts.raster) {
     const m = mkCanvas(); m.getContext('2d').drawImage(maskCanvas(l.vec.mask), 0, 0);
     const proxy = { id: l.id, name: l.name, canvas: m, ctx: ctxOf(m), visible: true };
@@ -250,8 +334,9 @@ function beginOp(opts = {}) {
   if (l.vec && !opts.vec) { askRasterize(l); return null; } // text/shapes stay editable unless the user agrees
   return { l, before: l.ctx.getImageData(0, 0, W, H), vb: l.vec ? clone(l.vec) : undefined };
 }
-function restoreOp(o) { o.l.ctx.putImageData(o.before, 0, 0); if (o.real) { o.real.vec = clone(o.vb); renderFill(o.real, o.l.canvas); return; } if (o.vb !== undefined) o.l.vec = clone(o.vb); }
+function restoreOp(o) { o.l.ctx.putImageData(o.before, 0, 0); if (o.maskOf) { o.maskOf._maDirty = true; return; } if (o.real) { o.real.vec = clone(o.vb); renderFill(o.real, o.l.canvas); return; } if (o.vb !== undefined) o.l.vec = clone(o.vb); }
 function commitOp(o) {
+  if (o.maskOf) { o.maskOf._maDirty = true; pushHistory({ t: 'px', m: true, id: o.maskOf.id, before: o.before, after: o.l.ctx.getImageData(0, 0, W, H) }); return; }
   if (o.real) { const url = o.l.canvas.toDataURL(); maskCache.set(url, o.l.canvas); o.real.vec.mask = url; o.real.vec.bb = contentBounds(o.l) || [0, 0, W, H]; renderFill(o.real); pushPixels(o.real, o.realBefore, o.vb); return; }
   pushPixels(o.l, o.before, o.vb);
 }
@@ -351,8 +436,8 @@ function addMiniTip(b, text) { if (text) b.title = text; }
 
 // ===== state for the tools
 Object.assign(state, {
-  brush: { size: 20, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, mirror: 'none', scatter: false, hard: false, pressure: true },
-  eraser: { size: 30, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, hard: false, pressure: true },
+  brush: { size: 20, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, mirror: 'none', scatter: false, hard: false, pressure: true, wrap: false },
+  eraser: { size: 30, soft: 20, step: 15, angle: 0, round: 100, flow: 100, opacity: 100, hard: false, pressure: true, wrap: false },
   pencilSize: 1, selType: 'rect', selMode: 'new', feather: 0, antialias: true,
   lassoType: 'free', lassoSize: 20, wandTol: 32, contiguous: true, wandSampleAll: false, arrFixed: true, snap: true,
 });
@@ -406,6 +491,7 @@ function compositeOnto(o, src, { erase = false, alpha = 1 } = {}) {
   let s = src;
   if (hasSel) { tmpX.globalCompositeOperation = 'source-over'; tmpX.clearRect(0, 0, W, H); tmpX.drawImage(src, 0, 0); tmpX.globalCompositeOperation = 'destination-in'; tmpX.drawImage(selC, 0, 0); tmpX.globalCompositeOperation = 'source-over'; s = tmpC; }
   withClip(o.l.ctx, c => { c.globalAlpha = alpha; c.globalCompositeOperation = erase ? 'destination-out' : 'source-over'; c.drawImage(s, 0, 0); });
+  if (o.maskOf) o.maskOf._maDirty = true;
   if (o.real) renderFill(o.real, o.l.canvas);
   requestRender();
 }
@@ -565,8 +651,25 @@ function stampAt(p) {
     let x = q.x, y = q.y;
     if (b.scatter) { const a = Math.random() * Math.PI * 2, d = Math.random() * b.size * .6; x += Math.cos(a) * d; y += Math.sin(a) * d; }
     const tip = op.tips.get(Math.round(size * 2) / 2) || (() => { const t = tintedTip(makeTip(b, size, b.hard), state.tool === 'eraser' ? '#000' : state.fg); op.tips.set(Math.round(size * 2) / 2, t); return t; })();
-    let dx = x - tip.width / 2, dy = y - tip.height / 2; if (b.hard) { dx = Math.round(dx); dy = Math.round(dy); }
-    sctx.globalAlpha = b.flow / 100; sctx.drawImage(tip, dx, dy);
+    sctx.globalAlpha = b.flow / 100;
+    if (isTemplate() && (painting3d || b.wrap)) stampWrapped(tip, x, y, b.hard);
+    else stampTip(tip, x, y, b.hard);
+  }
+}
+function stampTip(tip, x, y, hard, clipRect) {
+  let dx = x - tip.width / 2, dy = y - tip.height / 2; if (hard) { dx = Math.round(dx); dy = Math.round(dy); }
+  if (!clipRect) { sctx.drawImage(tip, dx, dy); return; }
+  sctx.save(); sctx.beginPath(); sctx.rect(...clipRect); sctx.clip(); sctx.drawImage(tip, dx, dy); sctx.restore();
+}
+// Wrap seams: a dab stays on its own face, and the part that would hang over an edge lands on the face that
+// edge joins on the 3D body (wherever that face sits on the template)
+function stampWrapped(tip, x, y, hard) {
+  const f = faceAt(x, y); if (!f) { stampTip(tip, x, y, hard); return; }
+  stampTip(tip, x, y, hard, f.rect);
+  const r = tip.width / 2;
+  for (const { e, o } of EDGES) {
+    if (e.part !== f.part || e.face !== f.face) continue;
+    const q = acrossSeam(e, o, { x, y }); if (q.d < r) stampTip(tip, q.x, q.y, hard, o.rect);
   }
 }
 function strokeTo(p) {
@@ -641,7 +744,7 @@ const shapeTool = {
 
 function floodFill(p, e) {
   const l = activeLayer(); if (!l.visible) { toast('The active layer is hidden'); return; }
-  if ((l.vec?.type === 'text' || l.vec?.type === 'shape') && !doc().noSel) { // recolour editable text/shapes instead of rasterizing them
+  if ((l.vec?.type === 'text' || l.vec?.type === 'shape') && !doc().noSel && !maskEditing(l)) { // recolour editable text/shapes instead of rasterizing them
     addRecent(state.fg); vecEdit(l, v => { v.fill = { type: 'color', color: state.fg }; }, l.vec.type === 'text' ? 'Text colour' : 'Shape fill'); buildOptions(); return;
   }
   const o = beginOp(); if (!o) return;
@@ -1057,7 +1160,8 @@ function buildOptions() {
       m.value = b.mirror; m.onchange = () => { b.mirror = m.value; }; m.title = 'Mirror strokes across the middle of the template';
       add(obLabel('Mirror:'), m, obToggle('Scatter', () => b.scatter, v => { b.scatter = v; }));
     }
-    add(obToggle('Hard tip', () => b.hard, v => { b.hard = v; drawOverlay(); }), obToggle('Use pen pressure', () => b.pressure, v => { b.pressure = v; }));
+    add(obToggle('Hard tip', () => b.hard, v => { b.hard = v; drawOverlay(); }), obToggle('Pen pressure', () => b.pressure, v => { b.pressure = v; }));
+    if (isTemplate()) { const w = obToggle('Wrap seams', () => b.wrap, v => { b.wrap = v; }); w.title = 'Strokes that run over the edge of a face carry on onto the face it joins on the body'; add(w); }
   } else if (t === 'pencil') {
     add(obLabel('Size:'), obNum(() => state.pencilSize, v => { state.pencilSize = v; drawOverlay(); }, { min: 1, max: 100, suffix: 'px' }), obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }));
   } else if (t === 'fill') {
@@ -1197,14 +1301,14 @@ let pickOnce = null;
 function colorPicker(hex, onChange) {
   let [h, s, v] = hex2hsv(hex);
   const w = el('div', 'cp');
-  const sv = mkCanvas(300, 130); sv.className = 'cp-sv'; const hue = mkCanvas(300, 16); hue.className = 'cp-hue';
+  const sv = mkCanvas(300, 130); sv.className = 'cp-sv'; const svBox = el('div', 'cp-svbox'), ring = el('div', 'cp-ring'); svBox.append(sv, ring); const hue = mkCanvas(300, 16); hue.className = 'cp-hue';
   const row = el('div', 'cp-row'); const hexIn = el('input', 'cp-hex'); hexIn.value = hex; const drop = el('button', 'ob-icon', '<svg viewBox="0 0 24 24"><path d="M14 6l4 4"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l-2-2z"/><path d="M15 8l-9 9-1 3 3-1 9-9"/></svg>');
-  drop.title = 'Pick a colour from the canvas'; row.append(hexIn, drop); w.append(sv, hue, row);
+  drop.title = 'Pick a colour from the canvas'; row.append(hexIn, drop); w.append(svBox, hue, row);
   const draw = () => {
     const x = sv.getContext('2d'); x.fillStyle = hsv2hex(h, 1, 1); x.fillRect(0, 0, 300, 130);
     let g = x.createLinearGradient(0, 0, 300, 0); g.addColorStop(0, '#fff'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(0, 0, 300, 130);
     g = x.createLinearGradient(0, 0, 0, 130); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, '#000'); x.fillStyle = g; x.fillRect(0, 0, 300, 130);
-    x.strokeStyle = v > .5 ? '#000' : '#fff'; x.lineWidth = 1.5; x.beginPath(); x.arc(s * 300, (1 - v) * 130, 7, 0, Math.PI * 2); x.stroke();
+    ring.style.left = s * 100 + '%'; ring.style.top = (1 - v) * 100 + '%'; ring.style.borderColor = v > .5 ? '#000' : '#fff';
     const y = hue.getContext('2d'); g = y.createLinearGradient(0, 0, 300, 0); for (let i = 0; i <= 6; i++) g.addColorStop(i / 6, hsv2hex(i * 60 % 360, 1, 1)); y.fillStyle = g; y.fillRect(0, 0, 300, 16);
     y.fillStyle = '#fff'; y.strokeStyle = '#000'; y.fillRect(h / 360 * 300 - 2, 0, 4, 16); y.strokeRect(h / 360 * 300 - 2, .5, 4, 15);
   };
@@ -1225,7 +1329,9 @@ const GRAD_PRESETS = [
   [['#ffffff', 1], ['#00ff20', 1]], [['#ffffff', 1], ['#2020ff', 1]], [['#00e5ff', 1], ['#ff9d00', 1]], [['#c8f0b0', 1], ['#5ab0e8', 1]], [['#7a1a00', 1], ['#2a0a0a', 1]],
 ].map(st => ({ type: 'gradient', kind: 'linear', angle: 0, stops: st.map((s, i, a) => ({ pos: Array.isArray(s) && a.length === 3 && i === 1 ? .5 : i / (a.length - 1), color: s[0], alpha: 1 })) }));
 
+let fillDlg = null;
 function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone = true } = {}, onChange, onDone) {
+  if (fillDlg && document.body.contains(fillDlg.wrap)) { if (fillDlg.title === title) return; fillDlg.cancel(); }
   let p = clone(initial) || { type: 'color', color: state.fg };
   const lastColor = () => p.type === 'color' ? p.color : p.type === 'gradient' ? p.stops[0].color : p.type === 'pattern' ? p.color : state.fg;
   const body = el('div', 'fill-dlg');
@@ -1281,7 +1387,7 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     const rebuild = () => { g.innerHTML = ''; if (allowNone) g.append(noneBtn(() => { p = { type: 'none' }; emit(); })); for (const id of PATTERNS) { const b = el('button', 'fill-sw pat' + (p.id === id ? ' on' : '')); b.style.background = `url(${patternTile(id, '#fff').toDataURL()}) #2a2a2a`; b.title = id; b.onclick = () => { p.id = id; p.type = 'pattern'; drawPrev(); emit(); rebuild(); }; g.append(b); } };
     pane.append(prev, ctl, g); drawPrev(); rebuild();
   }
-  dlg(title, body, { okLabel: 'OK', onOk: () => onDone(true, clone(p)), onCancel: () => onDone(false, clone(initial)) });
+  fillDlg = { title, ...dlg(title, body, { okLabel: 'OK', onOk: () => onDone(true, clone(p)), onCancel: () => onDone(false, clone(initial)) }) };
   tab(colorOnly ? 'color' : (p.type === 'gradient' ? 'gradient' : p.type === 'pattern' ? 'pattern' : 'color'));
 }
 function paintSwatch(get, set, opts = {}) {
@@ -1766,7 +1872,7 @@ async function exportPxz() {
   endTextEdit(); flushVecEdit();
   const d = doc(), entries = [], stack = [];
   for (const l of d.layers) {
-    const b = contentBounds(l) || [0, 0, 1, 1], c = mkCanvas(b[2], b[3]); c.getContext('2d').drawImage(l.canvas, -b[0], -b[1]);
+    const b = contentBounds(l) || [0, 0, 1, 1], c = mkCanvas(b[2], b[3]); c.getContext('2d').drawImage(layerSource(l), -b[0], -b[1]);
     const id = Math.random().toString(16).slice(2, 14).padEnd(12, '0') + '.png';
     entries.push({ name: id, data: new Uint8Array(await (await canvasBlob(c)).arrayBuffer()) });
     const item = { name: l.name, type: 'image', rect: { x: b[0], y: b[1], w: b[2], h: b[3], r: 0 }, opacity: l.opacity, locked: !!l.locked, visible: l.visible, link: '', content: id };
@@ -2026,6 +2132,10 @@ tools.pen = penTool;
 // ------------------------------------------------------------------ fixed right-hand options
 const bindCheck = (id, key, after) => { $(id).onchange = () => { state[key] = $(id).checked; after?.(); }; };
 bindCheck('#optUnderlay', 'underlay', requestRender); bindCheck('#optGuides', 'guides', drawOverlay); bindCheck('#optShade', 'shade', drawOverlay);
+bindCheck('#optSeams', 'seams', () => {
+  drawOverlay(); if (!state.seams || !isTemplate()) return;
+  const n = seamMismatches().bad; toast(n ? `${n} seam${n === 1 ? '' : 's'} don't match (red). Hover near an edge to see the edge it joins.` : 'Every seam matches. Hover near an edge to see the edge it joins.');
+});
 $('#colFg').oninput = () => { state.fg = $('#colFg').value; };
 $('#colBg').oninput = () => { state.bg = $('#colBg').value; };
 for (const [id, key, title] of [['#colFg', 'fg', 'Primary colour'], ['#colBg', 'bg', 'Secondary colour']]) {
@@ -2155,6 +2265,15 @@ function rebuildLayers() {
     if (g && g.collapsed) continue;
     const row = el('div', 'layer' + (l.id === d.activeId && !d.noSel && !d.activeGroup ? ' active' : '') + (!d.noSel && d.sel.size > 1 && d.sel.has(l.id) && !d.activeGroup ? ' multi' : '') + (l.visible ? '' : ' hidden') + (g ? ' in-group' : '') + (d.activeGroup && l.group === d.activeGroup ? ' group-sel' : ''));
     const th = mkCanvas(80, 76); thumbs.set(l.id, th);
+    let mth = null;
+    if (l.mask) {
+      const editing = maskEditing(l, d);
+      th.classList.add('ly-th'); th.classList.toggle('on', l.id === d.activeId && !d.noSel && !editing); th.title = 'Layer - click to paint on the layer';
+      th.onclick = (ev) => { ev.stopPropagation(); d.maskEdit = null; selectLayer(l); };
+      mth = mkCanvas(80, 76); mth.className = 'ly-th mask-th' + (editing ? ' on' : '') + (l.maskOff ? ' off' : ''); thumbs.set(l.id + ':mask', mth);
+      mth.title = 'Mask - click to paint on it (black hides, white shows). Shift+click turns it off and on.';
+      mth.onclick = (ev) => { ev.stopPropagation(); if (ev.shiftKey) { propChange(l, 'maskOff', !l.maskOff, l.maskOff ? 'Enable mask' : 'Disable mask'); return; } editMask(l); };
+    }
     const info = el('div', 'info'); const name = el('div', 'name'); name.textContent = l.name; name.title = 'Double-click to rename';
     const sub = el('div', 'sub');
     sub.textContent = (l.vec?.type === 'fill' ? 'Colour fill' + (l.vec.link && swatchById(l.vec.link) ? ' · ' + swatchById(l.vec.link).name : '') : l.kind) + (l.opacity < 1 ? ' · ' + Math.round(l.opacity * 100) + '%' : '') + (l.blend !== 'source-over' ? ' · ' + ($('#lyBlend').querySelector(`[value="${l.blend}"]`)?.textContent || l.blend) : '');
@@ -2163,9 +2282,10 @@ function rebuildLayers() {
     const eye = el('button', 'eye', l.visible ? eyeOn : eyeOff); eye.title = 'Show / hide';
     eye.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'visible', !l.visible, 'Visibility'); };
     if (l.vec?.type === 'fill') { th.title = 'Double-click to change the colour'; th.ondblclick = (ev) => { ev.stopPropagation(); editFillLayerColour(l); }; }
-    if (l.locked) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Locked - click to unlock'; lk.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'locked', false, 'Unlock layer'); }; row.append(th, info, lk, eye); }
-    else row.append(th, info, eye);
-    row.onclick = (e) => selectLayer(l, e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : null);
+    const ths = mth ? [th, mth] : [th];
+    if (l.locked) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Locked - click to unlock'; lk.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'locked', false, 'Unlock layer'); }; row.append(...ths, info, lk, eye); }
+    else row.append(...ths, info, eye);
+    row.onclick = (e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey && l.id !== d.activeId) d.maskEdit = null; selectLayer(l, e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : null); };
     rowDnD(row, { layer: l }); list.appendChild(row);
   }
   const ag = d.activeGroup && d.groups.find(x => x.id === d.activeGroup), a = activeLayer();
@@ -2185,6 +2305,8 @@ function updateThumbs() {
   for (const l of doc().layers) {
     const th = thumbs.get(l.id); if (!th) continue;
     const c = th.getContext('2d'); c.clearRect(0, 0, th.width, th.height); c.drawImage(l.canvas, 0, 0, th.width, th.height);
+    const mt = l.mask && thumbs.get(l.id + ':mask');
+    if (mt) { const x = mt.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, mt.width, mt.height); x.drawImage(l.mask, 0, 0, mt.width, mt.height); }
   }
 }
 $('#lyOpacity').oninput = () => { const d = doc(), ag = d.activeGroup && d.groups.find(x => x.id === d.activeGroup), v = $('#lyOpacity').value / 100; if (ag) ag.opacity = v; else activeLayer().opacity = v; $('#lyOpacityVal').textContent = $('#lyOpacity').value + '%'; requestRender(); };
@@ -2198,6 +2320,42 @@ $('#lyOpacity').onchange = () => {
 };
 $('#lyBlend').onchange = () => propChange(activeLayer(), 'blend', $('#lyBlend').value, 'Blend mode');
 
+// ---- mask commands
+function editMask(l, fresh) {
+  const d = doc(); if (!l.mask) return;
+  const first = fresh || d.maskEdit !== l.id; selectLayer(l); d.maskEdit = l.id; rebuildLayers(); buildOptions();
+  if (first) {
+    if (!['brush', 'pencil', 'eraser', 'fill', 'gradient'].includes(state.tool)) setTool('brush');
+    state.fg = '#000000'; state.bg = '#ffffff'; $('#colFg').value = state.fg; $('#colBg').value = state.bg;
+    toast('Painting on the mask: black hides the layer, white brings it back, grey hides it partly');
+  }
+}
+function addMask(fromSel) {
+  const l = activeLayer(); if (doc().activeGroup) { toast('Masks go on layers, not groups'); return; }
+  if (l.mask) { editMask(l); return; }
+  structOp(() => {
+    l.mask = newMask(W, H, fromSel ? '#000' : '#fff');
+    if (fromSel) { const x = l.mask.getContext('2d'); const t = mkCanvas(), tx = t.getContext('2d'); tx.fillStyle = '#fff'; tx.fillRect(0, 0, W, H); tx.globalCompositeOperation = 'destination-in'; tx.drawImage(selC, 0, 0); x.drawImage(t, 0, 0); }
+    l.maskOff = false; doc().maskEdit = l.id;
+  }, fromSel ? 'Mask from selection' : 'Add mask');
+  if (fromSel) deselect();
+  editMask(l, true);
+}
+function applyMask() {
+  const l = activeLayer(); if (!l.mask) return;
+  if (l.vec) { toast('Rasterize the layer first (Layer → Rasterize layer), or keep the mask - it already hides those parts'); return; }
+  structOp(() => { if (!l.maskOff) { const c = l.ctx; c.globalCompositeOperation = 'destination-in'; c.drawImage(maskAlpha(l), 0, 0); c.globalCompositeOperation = 'source-over'; } delete l.mask; delete l.maskOff; delete l._ma; doc().maskEdit = null; }, 'Apply mask');
+}
+function deleteMask() { const l = activeLayer(); if (!l.mask) return; structOp(() => { delete l.mask; delete l.maskOff; delete l._ma; doc().maskEdit = null; }, 'Delete mask'); }
+function invertMask() {
+  const l = activeLayer(); if (!l.mask) return;
+  labelled('Invert mask', () => {
+    const d = doc(), keep = d.maskEdit; d.maskEdit = l.id; const o = beginOp(); d.maskEdit = keep; if (!o) return;
+    const x = o.l.ctx, id = x.getImageData(0, 0, W, H), p = id.data;
+    for (let i = 0; i < p.length; i += 4) { const a = p[i + 3] / 255, v = 255 - Math.round(p[i] * a + 255 * (1 - a)); p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
+    x.putImageData(id, 0, 0); commitOp(o); requestRender();
+  });
+}
 function addLayer(name) {
   const d = doc(); const a = activeLayer(), l = makeLayer(name || 'Layer ' + (++d.counter));
   if (!d.noSel && a?.group) l.group = a.group;
@@ -2206,9 +2364,11 @@ function addLayer(name) {
 function copyLayer(a, nameSuffix = ' copy') {
   const l = makeLayer(a.name + nameSuffix);
   Object.assign(l, { opacity: a.opacity, blend: a.blend, visible: a.visible, kind: a.kind, locked: a.locked, group: a.group || null }); if (a.vec) l.vec = clone(a.vec); l.ctx.drawImage(a.canvas, 0, 0);
+  if (a.mask) { l.mask = mkCanvas(); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(a.mask, 0, 0); l.maskOff = !!a.maskOff; }
   return l;
 }
 $('#lyAdd').onclick = () => structOp(() => { addLayer(); }, 'New layer');
+$('#lyMask').onclick = () => { const l = activeLayer(); if (l.mask) editMask(l); else addMask(false); };
 $('#lyDup').onclick = () => structOp(() => {
   const d = doc();
   if (d.activeGroup) {
@@ -2250,7 +2410,8 @@ $('#lyMerge').onclick = () => structOp(() => {
   if (d.activeGroup) { const g = d.groups.find(x => x.id === d.activeGroup), mem = groupMembers(g.id), m = makeLayer(g.name); flattenInto(m, mem); d.layers.splice(d.layers.indexOf(mem[mem.length - 1]) + 1, 0, m); d.layers = d.layers.filter(l => !mem.includes(l)); d.activeId = m.id; d.activeGroup = null; d.sel = new Set([m.id]); normalizeGroups(d); return; }
   const a = activeLayer(), i = d.layers.indexOf(a); if (i === 0) return false;
   const below = d.layers[i - 1], c = below.ctx; delete below.vec; below.kind = 'Layer';
-  if (a.visible) { c.globalAlpha = a.opacity; c.globalCompositeOperation = a.blend; c.drawImage(a.canvas, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; }
+  if (below.mask) { if (!below.maskOff) { c.globalCompositeOperation = 'destination-in'; c.drawImage(maskAlpha(below), 0, 0); c.globalCompositeOperation = 'source-over'; } delete below.mask; delete below.maskOff; delete below._ma; }
+  if (a.visible) { c.globalAlpha = a.opacity; c.globalCompositeOperation = a.blend; c.drawImage(layerSource(a), 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; }
   d.layers.splice(i, 1); d.activeId = below.id; d.sel = new Set([below.id]);
 }, doc().activeGroup ? 'Merge group' : 'Merge down');
 $('#lyClear').onclick = () => hasSel ? clearSelectedPixels() : labelled('Clear', () => { const o = beginOp(); if (!o) return; withClip(o.l.ctx, c => c.clearRect(0, 0, W, H)); commitOp(o); });
@@ -2352,7 +2513,84 @@ $('#skinCol').oninput = () => preview?.setSkin($('#skinCol').value);
 const syncShow = () => preview?.setShow($('#showShirt').checked, $('#showPants').checked);
 $('#showShirt').onchange = syncShow; $('#showPants').onchange = syncShow;
 $('#autoRot').onchange = () => preview?.setAutoRotate($('#autoRot').checked);
-$('#btnShot').onclick = () => { if (preview) saveDataUrl(preview.snapshot(), 'preview.png', 'PNG image', ['png']); };
+$('#btnShot').onclick = () => openRenderDialog();
+
+// ---- paint on the 3D model: the preview says which template pixel is under the pointer, and the tool paints there
+const PAINT3D_TOOLS = new Set(['brush', 'eraser', 'pencil', 'fill', 'eyedropper']);
+let painting3d = false, p3gap = false, p3wait = false; // p3wait: pressed off the body, the stroke starts when the pointer reaches it
+const fitsMode = (kind) => kind === 1 || kind === (state.mode === 'shirt' ? 2 : 3);
+function paint3d(phase, samples, e) {
+  if (!isTemplate() || homeOpen()) return;
+  const ev = { shiftKey: false, altKey: false, detail: 1, pointerType: e.pointerType, pressure: e.pressure };
+  if (phase === 'down' || (phase === 'move' && p3wait)) {
+    if (phase === 'down') p3wait = false;
+    const i = samples.findIndex(Boolean), s = samples[i];
+    if (!s) { if (phase === 'down') p3wait = PAINT3D_TOOLS.has(state.tool) && !['fill', 'eyedropper'].includes(state.tool); return; }
+    p3wait = false; samples = samples.slice(i + 1);
+    if (!PAINT3D_TOOLS.has(state.tool)) { toast('Painting on the model works with the Brush, Pencil, Eraser, Fill and Eyedropper'); return; }
+    const want = s.kind === 2 ? 'shirt' : s.kind === 3 ? 'pants' : state.mode;
+    if (want !== state.mode) { setMode(want); toast(`Switched to ${want === 'shirt' ? 'Shirt' : 'Pants'}: that part of the body only shows the ${want}`); }
+    const p = { x: s.x, y: s.y };
+    if (state.tool === 'fill') { floodFill(p, ev); return; }
+    if (state.tool === 'eyedropper') { pickColor(p); return; }
+    painting3d = true; p3gap = false;
+    tools[state.tool].down(p, ev); if (!op) { painting3d = false; return; }
+    if (phase === 'down') return;
+  }
+  if (phase === 'up') p3wait = false;
+  if (!painting3d || !op) return;
+  if (phase === 'up') { tools[state.tool].up(); painting3d = false; return; }
+  const pencil = state.tool === 'pencil';
+  for (const s of samples) {
+    if (!s || !fitsMode(s.kind)) { p3gap = true; continue; }
+    const p = { x: s.x, y: s.y, pr: penPressure(ev) };
+    // a jump on the template (crossing onto another face) starts a new dab instead of drawing a line across the template
+    const jump = p3gap || Math.hypot(p.x - op.last.x, p.y - op.last.y) > 6; p3gap = false;
+    if (pencil) { pencilSeg(jump ? p : op.last, p); op.last = p; }
+    else if (jump) { op.last = p; op.carry = 0; stampAt(p); op.carry = Math.max(.5, brushOf().size * Math.max(1, brushOf().step) / 100); }
+    else strokeTo(p);
+  }
+  compositeSoon(pencil ? () => compositeOnto(op, strokeC, { alpha: state.opacity }) : applyBrush);
+}
+if (preview) preview.onPaint = paint3d;
+$('#btnPaint3d').onclick = () => {
+  const on = !$('#btnPaint3d').classList.contains('on'); $('#btnPaint3d').classList.toggle('on', on); preview?.setPaint(on);
+  if (on) { if (!PAINT3D_TOOLS.has(state.tool)) setTool('brush'); toast('Paint on the model with the left button. Right-drag turns it, Shift+right-drag moves it up and down.'); }
+};
+
+// ---- Save preview image: a clean render of the model from a chosen side, for thumbnails and adverts
+const RENDER_VIEWS = [['front', 'Front', 0], ['back', 'Back', Math.PI], ['pair', 'Front + back', null], ['three', 'Three-quarter', 0.6], ['left', 'Left side', Math.PI / 2], ['right', 'Right side', -Math.PI / 2], ['current', 'As shown', null]];
+const renderOpts = { view: 'front', size: 1024, bg: 'none', color: '#ffffff', shadow: true };
+function renderPreview(size) {
+  const o = renderOpts, bg = o.bg === 'color' ? o.color : null;
+  if (o.view === 'pair') {
+    const out = mkCanvas(size, size), x = out.getContext('2d'); if (bg) { x.fillStyle = bg; x.fillRect(0, 0, size, size); }
+    const half = Math.round(size / 2);
+    x.drawImage(preview.renderImage({ w: half, h: size, view: { theta: 0 }, shadow: o.shadow }), 0, 0);
+    x.drawImage(preview.renderImage({ w: size - half, h: size, view: { theta: Math.PI }, shadow: o.shadow }), half, 0);
+    return out;
+  }
+  const v = RENDER_VIEWS.find(r => r[0] === o.view);
+  return preview.renderImage({ w: size, h: size, view: o.view === 'current' ? null : { theta: v[2] }, shadow: o.shadow, background: bg });
+}
+function openRenderDialog() {
+  if (!preview || !isTemplate()) return;
+  const body = el('div', 'render-dlg'), img = el('img', 'render-prev'), side = el('div', 'render-opts');
+  const refresh = () => { img.src = renderPreview(320).toDataURL('image/png'); img.classList.toggle('checker', renderOpts.bg === 'none'); };
+  const views = obSeg(RENDER_VIEWS.map(([v, text]) => ({ v, text })), () => renderOpts.view, v => { renderOpts.view = v; refresh(); }); views.classList.add('render-views');
+  const sizes = obSeg([512, 1024, 2048].map(n => ({ v: String(n), text: n + ' px' })), () => String(renderOpts.size), v => { renderOpts.size = +v; });
+  const col = el('input'); col.type = 'color'; col.value = renderOpts.color; col.oninput = () => { renderOpts.color = col.value; renderOpts.bg = 'color'; bgs.sync(); refresh(); };
+  const bgs = obSeg([{ v: 'none', text: 'Transparent' }, { v: 'color', text: 'Colour' }], () => renderOpts.bg, v => { renderOpts.bg = v; refresh(); });
+  const shadow = obToggle('Ground shadow', () => renderOpts.shadow, v => { renderOpts.shadow = v; refresh(); });
+  const row = (label, ...x) => { const r = el('div', 'render-row'); r.append(obLabel(label), ...x); return r; };
+  side.append(row('View'), views, row('Size', sizes), row('Background', bgs, col), shadow);
+  const note = el('p', 'render-note'); note.textContent = 'Uses the Skin, Shirt and Pants settings under the preview.'; side.append(note);
+  body.append(img, side); refresh();
+  dlg('Save preview image', body, { okLabel: 'Save PNG', onOk: () => {
+    const name = fileSafe(state.sets[state.setIdx]?.name) + '-' + renderOpts.view + '.png';
+    saveDataUrl(renderPreview(renderOpts.size).toDataURL('image/png'), name, 'PNG image', ['png']);
+  } });
+}
 
 // ------------------------------------------------------------------ files
 function toast(msg) { setStatusMsg(msg); }
@@ -2403,7 +2641,7 @@ function serializeSet(set) {
   const out = { app: 'stitch-studio', version: 1, kind: set.kind || 'template', width: set.w || TW, height: set.h || TH, name: set.name, mode: set.mode, docs: {}, swatches: set.swatches };
   for (const k of Object.keys(set.docs)) {
     const d = set.docs[k];
-    out.docs[k] = { active: d.layers.findIndex(l => l.id === d.activeId), counter: d.counter, groups: d.groups || [], layers: d.layers.map(l => ({ name: l.name, kind: l.kind, vec: l.vec || null, group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, png: l.canvas.toDataURL('image/png') })) };
+    out.docs[k] = { active: d.layers.findIndex(l => l.id === d.activeId), counter: d.counter, groups: d.groups || [], layers: d.layers.map(l => ({ name: l.name, kind: l.kind, vec: l.vec || null, group: l.group || null, locked: !!l.locked, visible: l.visible, opacity: l.opacity, blend: l.blend, png: l.canvas.toDataURL('image/png'), ...(l.mask ? { mask: l.mask.toDataURL('image/png'), maskOff: !!l.maskOff } : {}) })) };
   }
   return out;
 }
@@ -2438,7 +2676,8 @@ async function fillDocs(set, data) {
     const d = newDoc(k, set.w, set.h); d.layers = []; d.counter = src.counter || src.layers.length;
     for (const o of src.layers) {
       const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, visible: o.visible, opacity: o.opacity, blend: o.blend });
-      const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0); if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') renderFill(l); if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
+      const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0);
+      if (o.mask) { const mi = new Image(); mi.src = o.mask; await mi.decode(); l.mask = mkCanvas(set.w, set.h); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(mi, 0, 0); l.maskOff = !!o.maskOff; } if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') renderFill(l); if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
     }
     if (!d.layers.length) d.layers.push(makeLayer('Layer 1', set.w, set.h));
     d.groups = src.groups || []; normalizeGroups(d);
@@ -2480,10 +2719,13 @@ document.addEventListener('drop', async e => { e.preventDefault(); if (e.dataTra
 const lib = native?.projectsList ? {
   list: () => native.projectsList(), read: (id) => native.projectRead(id),
   write: (id, data, meta) => native.projectWrite(id, data, meta), remove: (id) => native.projectDelete(id),
-} : { // plain browser: projects live in localStorage
+  setFolder: (id, folder) => native.projectSetFolder(id, folder),
+  versions: (id) => native.projectVersions(id), versionRead: (id, file) => native.projectVersionRead(id, file), snapshot: (id) => native.projectSnapshot(id),
+} : { // plain browser: projects live in localStorage (no version history)
+  async setFolder(id, folder) { const k = 'stitch-meta:' + id, m = JSON.parse(localStorage.getItem(k)); if (folder) m.folder = folder; else delete m.folder; localStorage.setItem(k, JSON.stringify(m)); },
   async list() { const out = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k.startsWith('stitch-meta:')) try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } } return out.sort((a, b) => (b.updated || 0) - (a.updated || 0)); },
   async read(id) { return localStorage.getItem('stitch-proj:' + id); },
-  async write(id, data, meta) { localStorage.setItem('stitch-proj:' + id, data); localStorage.setItem('stitch-meta:' + id, JSON.stringify(meta)); },
+  async write(id, data, meta) { const old = JSON.parse(localStorage.getItem('stitch-meta:' + id) || '{}'); if (!('folder' in meta) && old.folder) meta = { ...meta, folder: old.folder }; localStorage.setItem('stitch-proj:' + id, data); localStorage.setItem('stitch-meta:' + id, JSON.stringify(meta)); },
   async remove(id) { localStorage.removeItem('stitch-proj:' + id); localStorage.removeItem('stitch-meta:' + id); },
 };
 // the picture on a Home card: shirt and pants side by side for templates, the whole image for a normal canvas
@@ -2543,74 +2785,165 @@ async function loadSession() {
   return { hadData: true };
 }
 // ------------------------------------------------------------------ keyboard
-const keyTools = { k: 'pen', m: 'select', w: 'wand', h: 'hand', b: 'brush', p: 'pencil', e: 'eraser', g: 'fill', d: 'gradient', i: 'eyedropper', u: 'shape', l: 'lasso', t: 'text', v: 'move' };
+// Every shortcut is a command with a default key; Help → Keyboard shortcuts (or ?) lists them and lets you change them.
+// Changed keys are kept in localStorage "stitch-keys" ({ command id: key, or '' for none }).
+const stepSize = (dir) => { const v = curSize(); setSize(dir < 0 ? v - (v > 50 ? 10 : v > 10 ? 2 : 1) : v + (v >= 50 ? 10 : v >= 10 ? 2 : 1)); };
+const toggleLock = () => { const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); };
+const TOOL_NAMES = { move: 'Move', select: 'Select', lasso: 'Lasso', wand: 'Magic select', brush: 'Brush', eraser: 'Eraser', pencil: 'Pencil', fill: 'Fill bucket', gradient: 'Gradient', eyedropper: 'Eyedropper', shape: 'Shape', pen: 'Pen', text: 'Text', hand: 'Hand' };
+const COMMANDS = [
+  ...Object.entries({ move: 'V', select: 'M', lasso: 'L', wand: 'W', brush: 'B', eraser: 'E', pencil: 'P', fill: 'G', gradient: 'D', eyedropper: 'I', shape: 'U', pen: 'K', text: 'T', hand: 'H' })
+    .map(([t, key]) => ({ id: 'tool.' + t, group: 'Tools', label: TOOL_NAMES[t], key, run: () => setTool(t) })),
+  { id: 'swap', group: 'Tools', label: 'Swap colours', key: 'X', run: swapColors },
+  { id: 'sizeDown', group: 'Tools', label: 'Smaller brush', key: '[', run: () => stepSize(-1) },
+  { id: 'sizeUp', group: 'Tools', label: 'Bigger brush', key: ']', run: () => stepSize(1) },
+  { id: 'undo', group: 'Edit', label: 'Undo', key: 'Ctrl+Z', run: undo },
+  { id: 'redo', group: 'Edit', label: 'Redo', key: 'Ctrl+Y', also: ['Ctrl+Shift+Z'], run: redo },
+  { id: 'copy', group: 'Edit', label: 'Copy', key: 'Ctrl+C', run: () => copySel(false) },
+  { id: 'cut', group: 'Edit', label: 'Cut', key: 'Ctrl+X', run: () => copySel(true) },
+  { id: 'delete', group: 'Edit', label: 'Delete layer or selected pixels', key: 'Delete', also: ['Backspace'], run: () => { if (hasSel) clearSelectedPixels(); else $('#lyDel').click(); } },
+  { id: 'selectAll', group: 'Select', label: 'Select all', key: 'Ctrl+A', run: selectAll },
+  { id: 'deselect', group: 'Select', label: 'Deselect', key: 'Ctrl+Shift+A', run: deselect },
+  { id: 'invert', group: 'Select', label: 'Invert selection', key: 'Ctrl+Shift+I', run: invertSelection },
+  { id: 'newLayer', group: 'Layers', label: 'New layer', key: 'Ctrl+Shift+N', run: () => $('#lyAdd').click() },
+  { id: 'dup', group: 'Layers', label: 'Duplicate layer', key: 'Ctrl+J', also: ['Ctrl+D'], run: () => $('#lyDup').click() },
+  { id: 'rename', group: 'Layers', label: 'Rename layer', key: 'F2', run: renameActive },
+  { id: 'merge', group: 'Layers', label: 'Merge down', key: 'Ctrl+M', run: () => $('#lyMerge').click() },
+  { id: 'mergeVisible', group: 'Layers', label: 'Merge visible', key: 'Ctrl+Shift+M', run: mergeVisible },
+  { id: 'group', group: 'Layers', label: 'Group layers', key: 'Ctrl+G', run: groupLayers },
+  { id: 'ungroup', group: 'Layers', label: 'Ungroup', key: 'Ctrl+Shift+G', run: ungroupLayers },
+  { id: 'layerUp', group: 'Layers', label: 'Move layer up', key: 'Ctrl+]', run: () => $('#lyUp').click() },
+  { id: 'layerDown', group: 'Layers', label: 'Move layer down', key: 'Ctrl+[', run: () => $('#lyDown').click() },
+  { id: 'lock', group: 'Layers', label: 'Lock / unlock layer', key: 'Ctrl+/', run: toggleLock },
+  { id: 'zoomIn', group: 'View', label: 'Zoom in', key: '=', also: ['+'], run: () => setZoom(state.zoom * 1.25) },
+  { id: 'zoomOut', group: 'View', label: 'Zoom out', key: '-', run: () => setZoom(state.zoom / 1.25) },
+  { id: 'zoomFit', group: 'View', label: 'Fit to window', key: '0', also: ['Ctrl+0'], run: zoomFit },
+  { id: 'zoom100', group: 'View', label: 'Actual size', key: '1', run: () => setZoom(1) },
+  { id: 'toggleMode', group: 'View', label: 'Switch Shirt / Pants', key: 'Tab', run: () => { if (isTemplate()) setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); } },
+  { id: 'shortcuts', group: 'View', label: 'Keyboard shortcuts', key: '?', run: () => openShortcuts() },
+  { id: 'newProject', group: 'Files', label: 'New project', key: 'Ctrl+N', run: () => openNewProjectDialog() },
+  { id: 'open', group: 'Files', label: 'Open', key: 'Ctrl+O', run: () => $('#btnOpen').click() },
+  { id: 'save', group: 'Files', label: 'Save project (.stitch)', key: 'Ctrl+S', run: () => $('#btnSave').click() },
+  { id: 'import', group: 'Files', label: 'Import image as layer', key: 'Ctrl+I', run: () => $('#btnImport').click() },
+  { id: 'exportPng', group: 'Files', label: 'Export PNG', key: 'Ctrl+E', run: () => exportPng() },
+  { id: 'exportSet', group: 'Files', label: 'Export set (shirt + pants)', key: 'Ctrl+Shift+E', run: () => exportSet() },
+  { id: 'closeTab', group: 'Files', label: 'Close tab', key: 'Ctrl+W', run: () => closeSet(state.setIdx) },
+  { id: 'nextTab', group: 'Files', label: 'Next tab', key: 'Ctrl+Tab', run: () => switchSet((state.setIdx + 1) % state.sets.length) },
+  { id: 'prevTab', group: 'Files', label: 'Previous tab', key: 'Ctrl+Shift+Tab', run: () => switchSet((state.setIdx + state.sets.length - 1) % state.sets.length) },
+];
+// keys that always do the same thing, shown in the list but not changeable
+const FIXED_KEYS = [
+  ['Paste as a new layer', 'Ctrl+V'], ['Pan the canvas', 'Hold Space'], ['Pick a colour with most tools', 'Alt+click'],
+  ['Straight line (brush, pencil)', 'Shift+click'], ['Nudge the layer (Move)', 'Arrow keys'], ['Cancel / deselect', 'Esc'],
+  ['Skip snapping while moving', 'Hold Ctrl'], ['Full screen', 'F11'],
+];
+const RESERVED = new Set(['Ctrl+V', 'Space', 'Escape', 'Enter', 'F11', 'F12', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Shift+ArrowLeft', 'Shift+ArrowRight', 'Shift+ArrowUp', 'Shift+ArrowDown']);
+let keyOverrides = null; // read at boot (rebuildKeyMap), once the storage helpers exist
+const keysOf = (c) => c.id in keyOverrides ? (keyOverrides[c.id] ? [keyOverrides[c.id]] : []) : [c.key, ...(c.also || [])];
+const keyOf = (id) => { const c = COMMANDS.find(x => x.id === id); return c ? keysOf(c)[0] || '' : ''; };
+let keyMap = new Map();
+function rebuildKeyMap() { keyOverrides ??= store.get('stitch-keys') || {}; keyMap = new Map(); for (const c of COMMANDS) for (const k of keysOf(c)) if (!keyMap.has(k)) keyMap.set(k, c); refreshKeyHints(); }
+// "Ctrl+Shift+Z", "?", "F2" ... Shift is left out for symbols it already changes (Shift+/ is "?")
+function comboOf(e) {
+  let k = e.key; if (!k || ['Control', 'Shift', 'Alt', 'Meta'].includes(k)) return null;
+  if (k === ' ') k = 'Space'; else if (k === 'Del') k = 'Delete'; else if (k.length === 1) k = k.toUpperCase();
+  const symbol = k.length === 1 && !/[A-Z0-9]/.test(k);
+  return (e.ctrlKey || e.metaKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey && !symbol ? 'Shift+' : '') + k;
+}
+// tooltips that mention a shortcut follow the current keys
+const KEY_HINTS = { btnUndo: 'undo', btnRedo: 'redo', btnExport: 'exportPng', zoomFit: 'zoomFit', zoom100: 'zoom100', lyMerge: 'merge', lyAdd: 'newLayer', lyDup: 'dup', btnSwap: 'swap', zoomIn: 'zoomIn', zoomOut: 'zoomOut' };
+function refreshKeyHints() {
+  for (const [id, cmd] of Object.entries(KEY_HINTS)) { const b = document.getElementById(id); if (!b?.title) continue; const k = keyOf(cmd); b.title = b.title.replace(/\s*\([^)]*\)$/, '') + (k ? ` (${k})` : ''); }
+  for (const t of Object.keys(TOOL_NAMES)) if (TIPS[t]) TIPS[t][2] = keyOf('tool.' + t);
+}
+const TEXT_EDIT_KEYS = new Set(['Ctrl+A', 'Ctrl+C', 'Ctrl+X', 'Ctrl+Z', 'Ctrl+Y', 'Ctrl+Shift+Z', 'Delete', 'Backspace']);
 document.addEventListener('keydown', e => {
   if (homeOpen()) {
     if (document.querySelector('.modal')) return;
     const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
     if (mod && k === 'n') { e.preventDefault(); openNewProjectDialog(); }
     else if (mod && k === 'o') { e.preventDefault(); $('#btnOpen').click(); }
+    else if ((mod && k === 'f') || (k === '/' && !e.target.matches('input, textarea'))) { e.preventDefault(); $('#homeSearch').focus(); }
     else if (k === 'escape' && !$('#homeBack').hidden) hideHome();
     return;
   }
-  if (e.target.matches('input, textarea, select') && !(e.ctrlKey || e.metaKey)) return;
+  const inField = e.target.matches('input, textarea, select');
+  if (inField && !(e.ctrlKey || e.metaKey)) return;
   if (!$('#textModal').hidden || !$('#adjModal').hidden || document.querySelector('.modal.dlg-open, .modal:not([id])')) return;
-  const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
-  if (mod) {
-    if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-    else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
-    else if (k === 's') { e.preventDefault(); $('#btnSave').click(); }
-    else if (k === 'o') { e.preventDefault(); $('#btnOpen').click(); }
-    else if (k === 'e') { e.preventDefault(); e.shiftKey ? exportSet() : exportPng(); }
-    else if (k === 'i' && !e.shiftKey) { e.preventDefault(); $('#btnImport').click(); }
-    else if (k === 'j') { e.preventDefault(); $('#lyDup').click(); }
-    else if (k === 'd') { e.preventDefault(); $('#lyDup').click(); }
-    else if (k === 'n' && !e.shiftKey) { e.preventDefault(); openNewProjectDialog(); }
-    else if (k === 'w') { e.preventDefault(); closeSet(state.setIdx); }
-    else if (k === 'tab') { e.preventDefault(); switchSet((state.setIdx + (e.shiftKey ? state.sets.length - 1 : 1)) % state.sets.length); }
-    else if (k === 'g' && e.shiftKey) { e.preventDefault(); ungroupLayers(); }
-    else if (k === 'g') { e.preventDefault(); groupLayers(); }
-    else if (k === '/') { e.preventDefault(); const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); }
-    else if (k === 'a' && e.shiftKey) { e.preventDefault(); deselect(); }
-    else if (k === 'a') { e.preventDefault(); selectAll(); }
-    else if (k === 'i' && e.shiftKey) { e.preventDefault(); invertSelection(); }
-    else if (k === 'c') { e.preventDefault(); copySel(false); }
-    else if (k === 'x') { e.preventDefault(); copySel(true); }
-    else if (k === ']') { e.preventDefault(); $('#lyUp').click(); }
-    else if (k === '[') { e.preventDefault(); $('#lyDown').click(); }
-    else if (k === 'm' && e.shiftKey) { e.preventDefault(); mergeVisible(); }
-    else if (k === 'm') { e.preventDefault(); $('#lyMerge').click(); }
-    else if (k === 'n' && e.shiftKey) { e.preventDefault(); $('#lyAdd').click(); }
-    else if (k === '0') { e.preventDefault(); zoomFit(); }
-    return;
+  const k = e.key.toLowerCase();
+  // keys that depend on what is going on right now
+  if (!inField) {
+    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); return; }
+    if ((k === 'delete' || k === 'backspace') && state.tool === 'pen' && deletePenPoint()) { e.preventDefault(); return; }
+    if (k === 'enter' && penDraw) { finishPath(); return; }
+    if (k === 'enter' && lasso) { finishLasso(); return; }
+    if (k === 'escape') { if (penDraw) finishPath(); else if (lasso) { lasso = null; selPreview = null; drawOverlay(); } else if (op) cancelOp(); else if (hasSel) deselect(); return; }
+    if (state.tool === 'move' && k.startsWith('arrow') && !(e.ctrlKey || e.metaKey)) {
+      e.preventDefault(); const s = e.shiftKey ? 10 : 1;
+      nudge(k === 'arrowleft' ? -s : k === 'arrowright' ? s : 0, k === 'arrowup' ? -s : k === 'arrowdown' ? s : 0); return;
+    }
   }
-  if (e.target.matches('input, textarea, select')) return;
-  if (e.code === 'Space') { spaceDown = true; e.preventDefault(); return; }
-  if (k === 'f2') { e.preventDefault(); renameActive(); return; }
-  if ((k === 'delete' || k === 'backspace') && state.tool === 'pen' && deletePenPoint()) { e.preventDefault(); return; }
-  if (k === 'enter' && penDraw) { finishPath(); return; }
-  if (k === 'delete' || k === 'backspace') { e.preventDefault(); if (hasSel) clearSelectedPixels(); else $('#lyDel').click(); return; }
-  if (k === 'enter' && lasso) { finishLasso(); return; }
-  if (keyTools[k]) { setTool(keyTools[k]); return; }
-  if (k === 'x') swapColors();
-  else if (k === '[') { const v = curSize(); setSize(v - (v > 50 ? 10 : v > 10 ? 2 : 1)); }
-  else if (k === ']') { const v = curSize(); setSize(v + (v >= 50 ? 10 : v >= 10 ? 2 : 1)); }
-  else if (k === '+' || k === '=') setZoom(state.zoom * 1.25);
-  else if (k === '-') setZoom(state.zoom / 1.25);
-  else if (k === '0') zoomFit();
-  else if (k === '1') setZoom(1);
-  else if (k === 'escape' && penDraw) finishPath();
-  else if (k === 'escape') { if (lasso) { lasso = null; selPreview = null; drawOverlay(); } else if (op) cancelOp(); else if (hasSel) deselect(); }
-  else if (k === 'tab') { e.preventDefault(); if (isTemplate()) setMode(state.mode === 'shirt' ? 'pants' : 'shirt'); }
-  else if (state.tool === 'move' && k.startsWith('arrow')) {
-    e.preventDefault(); const s = e.shiftKey ? 10 : 1;
-    nudge(k === 'arrowleft' ? -s : k === 'arrowright' ? s : 0, k === 'arrowup' ? -s : k === 'arrowdown' ? s : 0);
-  }
+  const combo = comboOf(e); if (!combo) return;
+  if (inField && TEXT_EDIT_KEYS.has(combo)) return; // let text boxes copy, paste and undo their own text
+  const cmd = keyMap.get(combo);
+  if (cmd) { e.preventDefault(); cmd.run(e); }
+  else if (e.ctrlKey || e.metaKey) { if (combo !== 'Ctrl+V' && /^Ctrl\+(Shift\+)?[A-Z0-9]$/.test(combo) && !inField) e.preventDefault(); } // no browser shortcuts (print, find...) inside the editor
 });
 document.addEventListener('keyup', e => { if (e.code === 'Space') spaceDown = false; });
 
+function openShortcuts() {
+  const body = el('div', 'keys');
+  const intro = el('p', 'np-note'); intro.textContent = 'Click a shortcut to change it, then press the new keys. Esc cancels.'; body.append(intro);
+  const list = el('div', 'keys-list'); body.append(list);
+  let capturing = null;
+  const stopCapture = () => { if (!capturing) return; window.removeEventListener('keydown', capturing.fn, true); capturing.btn.classList.remove('listening'); capturing = null; };
+  const draw = () => {
+    stopCapture(); list.innerHTML = '';
+    for (const g of [...new Set(COMMANDS.map(c => c.group))]) {
+      const h = el('div', 'keys-h'); h.textContent = g; list.append(h);
+      for (const c of COMMANDS.filter(x => x.group === g)) {
+        const row = el('div', 'keys-row'), lab = el('span'); lab.textContent = c.label;
+        const keys = keysOf(c), btn = el('button', 'kbd-btn' + (keys.length ? '' : ' none')); btn.textContent = keys.length ? keys.join('  or  ') : 'None';
+        btn.title = 'Click, then press the new keys';
+        btn.onclick = () => {
+          if (capturing?.btn === btn) { stopCapture(); return; } stopCapture();
+          btn.classList.add('listening'); btn.textContent = 'Press keys…';
+          const fn = (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (e.key === 'Escape') { draw(); return; }
+            const k = comboOf(e); if (!k) return;
+            if (RESERVED.has(k)) { toast(`${k} can't be changed`); return; }
+            const other = COMMANDS.find(x => x !== c && keysOf(x).includes(k));
+            if (other) { keyOverrides[other.id] = keysOf(other).filter(x => x !== k)[0] || ''; toast(`${k} was “${other.label}” - that one has no shortcut now`); }
+            keyOverrides[c.id] = k; saveKeys(); draw();
+          };
+          capturing = { btn, fn }; window.addEventListener('keydown', fn, true); // window: ahead of the dialog's own Esc/Enter keys
+        };
+        const clear = el('button', 'keys-x', '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>'); clear.title = 'No shortcut';
+        clear.onclick = () => { keyOverrides[c.id] = ''; saveKeys(); draw(); };
+        const reset = el('button', 'keys-x', '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v4h4"/></svg>'); reset.title = `Back to ${[c.key, ...(c.also || [])].join(' or ')}`;
+        reset.onclick = () => { delete keyOverrides[c.id]; for (const k of [c.key, ...(c.also || [])]) for (const x of COMMANDS) if (x !== c && x.id in keyOverrides && keyOverrides[x.id] === k) keyOverrides[x.id] = ''; saveKeys(); draw(); };
+        reset.hidden = !(c.id in keyOverrides); clear.hidden = !keys.length;
+        row.append(lab, reset, clear, btn); list.append(row);
+      }
+    }
+    const h = el('div', 'keys-h'); h.textContent = 'Always'; list.append(h);
+    for (const [label, key] of FIXED_KEYS) { const row = el('div', 'keys-row fixed'), lab = el('span'), kb = el('kbd'); lab.textContent = label; kb.textContent = key; row.append(lab, kb); list.append(row); }
+  };
+  const saveKeys = () => { store.set('stitch-keys', keyOverrides); rebuildKeyMap(); };
+  draw();
+  dlg('Keyboard shortcuts', body, { noFoot: false, okLabel: 'Done', cancelLabel: 'Reset all', center: true, outsideClose: true,
+    onOk: () => stopCapture(),
+    onCancel: () => { stopCapture(); },
+    extra: [],
+  });
+  // "Reset all" is the left button: it asks first, then puts every key back
+  const resetAll = [...document.querySelectorAll('.dlg .pill.ghost')].at(-1);
+  if (resetAll) resetAll.onclick = () => confirmDlg('Reset all shortcuts', 'Put every keyboard shortcut back to how it came?', 'Reset', () => { keyOverrides = {}; saveKeys(); draw(); });
+}
+
 // ------------------------------------------------------------------ menu bar
 let dlgPos = null;
+const openDlgs = new Set(); // cancel functions of the dialogs on screen
 function makeDraggable(handle, onMove, onEnd) {
   handle.style.cursor = 'move'; handle.style.touchAction = 'none';
   handle.addEventListener('pointerdown', (e) => {
@@ -2657,13 +2990,14 @@ function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = '
   else makeDraggable(head, (dx, dy) => { px += dx; py += dy; place(); }, () => { dlgPos = { x: px, y: py }; });
   const outside = (e) => { if (!box.contains(e.target)) doCancel(); };
   if (outsideClose) setTimeout(() => document.addEventListener('pointerdown', outside, true));
-  const close = () => { fadeOut(box, () => wrap.remove()); document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside, true); };
+  const close = () => { openDlgs.delete(doCancel); fadeOut(box, () => wrap.remove()); document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside, true); };
   const doCancel = () => { onCancel?.(); close(); };
   const doOk = () => { if (onOk?.() !== false) close(); };
   const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); doCancel(); } else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.matches('input[type=text], input:not([type])')) { e.stopPropagation(); e.preventDefault(); doOk(); } };
   document.addEventListener('keydown', key, true);
   cancel.onclick = doCancel; x.onclick = () => { if (onClose) { onClose(); close(); } else doCancel(); }; ok.onclick = doOk;
-  return { wrap, close };
+  openDlgs.add(doCancel);
+  return { wrap, close, cancel: doCancel };
 }
 const isModalOpen = () => !!document.querySelector('.modal:not([hidden])');
 
@@ -2890,7 +3224,11 @@ function openCurves() {
 // ---- canvas (whole document) transforms
 function transformAll(label, fn) {
   structOp(() => {
-    for (const l of doc().layers) { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; const snap = mkCanvas(); snap.getContext('2d').drawImage(l.canvas, 0, 0); const c = l.ctx; c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H); fn(c, snap); c.restore(); }
+    for (const l of doc().layers) {
+      delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer';
+      for (const t of l.mask ? [l.canvas, l.mask] : [l.canvas]) { const snap = mkCanvas(); snap.getContext('2d').drawImage(t, 0, 0); const c = t.getContext('2d'); c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H); fn(c, snap); c.restore(); }
+      l._maDirty = true;
+    }
   }, label);
 }
 const rotateCanvas = (dir) => transformAll(dir > 0 ? 'Rotate right' : 'Rotate left', (c, s) => { c.translate(W / 2, H / 2); c.rotate(dir * Math.PI / 2); c.drawImage(s, -W / 2, -H / 2); });
@@ -2934,6 +3272,7 @@ function resizeProject(kind, nw, nh, anchor) {
     } else if (v && kind === 'image') { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; } // scaled text/shapes become pixels, like rotate/flip
     else if (v) shiftVec(v, dx, dy);
     l.canvas = redraw(l.canvas); l.ctx = ctxOf(l.canvas);
+    if (l.mask) { l.mask = redraw(l.mask); l._maDirty = true; }
   }
   setProjectSize(nw, nh);
   pushHistory({ t: 'sz', label: kind === 'image' ? 'Image size' : 'Canvas size', before, after: { w: nw, h: nh, struct: snapStruct() } });
@@ -2982,12 +3321,14 @@ function sizeDialog(kind) {
   const anchor = anchorGrid(kind === 'image' ? 0 : 4);
   const aLabel = document.createElement('div'); aLabel.className = 'anchor-row'; aLabel.innerHTML = '<span class="sl-label">Anchor</span>'; aLabel.append(anchor);
   body.append(note, wRow, hRow, lock, pct, aLabel);
-  const snaps = doc().layers.map(l => { const s = mkCanvas(); s.getContext('2d').drawImage(l.canvas, 0, 0); return s; });
+  // every layer, and every mask, scales or shifts the same way
+  const targets = doc().layers.flatMap(l => (l.mask ? [l.canvas, l.mask] : [l.canvas]).map(t => ({ l, t, snap: (() => { const s = mkCanvas(); s.getContext('2d').drawImage(t, 0, 0); return s; })() })));
+  const snaps = targets.map(x => x.snap);
   const before = snapStruct();
   const apply = () => {
     const nw = Math.max(1, wRow.value()), nh = Math.max(1, hRow.value()), ax = (anchor.value % 3) / 2, ay = Math.floor(anchor.value / 3) / 2;
-    doc().layers.forEach((l, i) => {
-      const c = l.ctx; c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H); c.imageSmoothingQuality = 'high';
+    targets.forEach(({ l, t }, i) => {
+      l._maDirty = true; const c = t.getContext('2d'); c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H); c.imageSmoothingQuality = 'high';
       if (kind === 'image') c.drawImage(snaps[i], Math.round((W - nw) * ax), Math.round((H - nh) * ay), nw, nh);
       else c.drawImage(snaps[i], Math.round((nw - W) * ax), Math.round((nh - H) * ay));
       c.restore();
@@ -3030,13 +3371,14 @@ const MENUS = [
     { label: 'Clear current template', run: () => $('#btnNew').click() },
     { label: 'Open (.stitch, Pixlr .pxz or image)…', key: 'Ctrl+O', run: () => $('#btnOpen').click() },
     { label: 'Save project (.stitch)…', key: 'Ctrl+S', run: () => $('#btnSave').click() },
+    { label: 'Version history…', run: async () => { await saveDirty(); const st = state.sets[state.setIdx], m = (await lib.list()).find(x => x.id === st.id); if (m) openVersions(m); else toast('This project hasn’t been saved yet'); }, off: () => !lib.versions || !!state.sets[state.setIdx]?.temp },
     { label: 'Export as Pixlr file (.pxz)…', run: exportPxz },
     '-',
     { label: 'Import image as layer…', key: 'Ctrl+I', run: () => $('#btnImport').click() },
     '-',
     { label: 'Export PNG…', key: 'Ctrl+E', run: () => exportPng() },
     { label: 'Export set (shirt + pants)…', key: 'Ctrl+Shift+E', run: () => exportSet(), off: () => !isTemplate() },
-    { label: 'Save preview image…', run: () => $('#btnShot').click(), off: () => !isTemplate() },
+    { label: 'Save preview image…', run: () => openRenderDialog(), off: () => !isTemplate() },
     '-',
     { label: 'Check for updates…', run: () => checkUpdates(true) },
   ] },
@@ -3060,6 +3402,14 @@ const MENUS = [
     { label: 'Convert to colour fill (keep shape)', run: () => convertToFill('alpha') },
     { label: 'Convert to colour fill (black & white mask)', run: () => convertToFill('luma') },
     { label: 'Change fill colour…', run: () => editFillLayerColour(activeLayer()), off: () => activeLayer().vec?.type !== 'fill' },
+    '-',
+    { label: 'Add mask', run: () => addMask(false), off: () => !!activeLayer().mask || !!doc().activeGroup },
+    { label: 'Add mask from selection', run: () => addMask(true), off: () => !hasSel || !!activeLayer().mask || !!doc().activeGroup },
+    { label: 'Edit mask', run: () => editMask(activeLayer()), off: () => !activeLayer().mask || maskEditing(activeLayer()) },
+    { label: 'Invert mask', run: invertMask, off: () => !activeLayer().mask },
+    { label: 'Turn mask off / on', run: () => { const l = activeLayer(); propChange(l, 'maskOff', !l.maskOff, l.maskOff ? 'Enable mask' : 'Disable mask'); }, off: () => !activeLayer().mask },
+    { label: 'Apply mask', run: applyMask, off: () => !activeLayer().mask },
+    { label: 'Delete mask', run: deleteMask, off: () => !activeLayer().mask },
     '-',
     { label: 'Group layers', key: 'Ctrl+G', run: groupLayers },
     { label: 'Ungroup', key: 'Ctrl+Shift+G', run: ungroupLayers, off: () => !doc().activeGroup && !activeLayer().group },
@@ -3097,7 +3447,17 @@ const MENUS = [
     { label: 'Temperature & tint…', run: () => openAdjust('temp') },
   ] },
   { label: 'Filter', items: [{ label: 'No filters yet', off: () => true }] },
+  { label: 'Help', items: [
+    { label: 'Keyboard shortcuts…', cmd: 'shortcuts', run: () => openShortcuts() },
+    { label: 'What’s new', run: async () => { const v = (native?.version ? await native.version().catch(() => null) : null) || CHANGELOG[0]?.version; showWhatsNew(v, CHANGELOG.filter(c => c.version === v).concat(CHANGELOG.some(c => c.version === v) ? [] : CHANGELOG.slice(0, 1))); } },
+    { label: 'Check for updates…', run: () => checkUpdates(true) },
+  ] },
 ];
+// which command each menu entry runs, so the menus show the keys the user picked
+const MENU_CMDS = { 'New project…': 'newProject', 'Open (.stitch, Pixlr .pxz or image)…': 'open', 'Save project (.stitch)…': 'save', 'Import image as layer…': 'import', 'Export PNG…': 'exportPng', 'Export set (shirt + pants)…': 'exportSet',
+  'New layer': 'newLayer', 'Duplicate layer': 'dup', 'Rename layer': 'rename', 'Delete layer': 'delete', 'Group layers': 'group', 'Ungroup': 'ungroup', 'Lock / unlock layer': 'lock', 'Merge down': 'merge', 'Merge visible': 'mergeVisible',
+  'Bring forward / up': 'layerUp', 'Send backward / down': 'layerDown', 'Select all': 'selectAll', 'Deselect': 'deselect', 'Invert selection': 'invert', 'Copy': 'copy', 'Cut': 'cut', 'Delete selected pixels': 'delete' };
+for (const m of MENUS) for (const it of m.items) if (it !== '-' && MENU_CMDS[it.label]) it.cmd = MENU_CMDS[it.label];
 
 // menu actions that only work on pixels are greyed out while text, a shape or a colour fill is selected
 const pixelsOnly = () => !doc().noSel && !!activeLayer()?.vec;
@@ -3116,7 +3476,7 @@ for (const m of MENUS) {
     for (const it of m.items) {
       if (it === '-') { const s = document.createElement('div'); s.className = 'mb-sep'; dd.append(s); continue; }
       const b = document.createElement('button'); b.className = 'mb-entry';
-      b.innerHTML = `<span></span><kbd>${it.key || ''}</kbd>`; b.firstChild.textContent = it.label;
+      b.innerHTML = `<span></span><kbd></kbd>`; b.firstChild.textContent = it.label; b.lastChild.textContent = it.cmd ? keyOf(it.cmd) : it.key || '';
       b.disabled = !!it.off?.() || !it.run;
       if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = 'Needs a plain image layer - use Layer → Rasterize layer first';
       b.onclick = () => { closeMenus(); it.run?.(); };
@@ -3515,10 +3875,17 @@ let homeFade = null, homeFirst = true; // the fade-out while leaving Home; Home 
 async function showHome() {
   const leaving = !!homeFade; if (homeFade) { homeFade.cancel(); homeFade = null; }
   const opening = !homeOpen() || leaving || homeFirst; homeFirst = false;
-  if (opening) { leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
+  if (opening) { closeEditorPopups(); leaveCurrent(); closeMenus(); closeLayerPop(); homeEl.hidden = false; }
   await saveDirty(); // so the cards show the latest pictures
   await renderHome();
   if (opening) { const g = $('#projGrid'); g.classList.add('intro'); setTimeout(() => g.classList.remove('intro'), 700); }
+}
+function closeEditorPopups() {
+  for (const c of [...openDlgs]) c();
+  if (!$('#adjModal').hidden) $('#adjCancel').click();
+  if (!$('#textModal').hidden) $('#textCancel').click();
+  if (pickOnce) { pickOnce = null; stack.classList.remove('picking'); }
+  closePop(); hideTip();
 }
 function hideHome() {
   if (!homeOpen() || homeFade) return;
@@ -3533,13 +3900,110 @@ function timeAgo(t) {
   if (!t) return ''; const s = (Date.now() - t) / 1000;
   return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : s < 172800 ? 'yesterday' : new Date(t).toLocaleDateString();
 }
+// what Home shows: a folder (null = all projects), a search and a sort order (the sort is remembered)
+const homeView = { folder: null, q: '', sort: store.get('stitch-home-sort') || 'updated' };
+let homeList = [];
+const createdAt = (m) => parseInt(String(m.id).slice(1, -5), 36) || m.updated || 0; // project ids start with the time they were made
+// folders are names on each project; empty folders are remembered separately so they don't vanish
+const savedFolders = () => { const f = store.get('stitch-folders'); return Array.isArray(f) ? f : []; };
+const setSavedFolders = (f) => store.set('stitch-folders', [...new Set(f)].sort((a, b) => a.localeCompare(b)));
+const allFolders = () => [...new Set([...savedFolders(), ...homeList.map(m => m.folder).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
 async function renderHome() {
   let list = []; try { list = await lib.list(); } catch (err) { console.error('could not list projects', err); }
+  homeList = list;
   $('#homeBack').hidden = !state.sets.some(s => !s.temp);
   $('#homeEmpty').hidden = list.length > 0;
+  if (homeView.folder && !allFolders().includes(homeView.folder)) homeView.folder = null;
+  renderFolders(); renderGrid();
+}
+function renderGrid() {
+  const q = homeView.q.trim().toLowerCase(), by = homeView.sort;
+  let list = homeList.filter(m => (!homeView.folder || m.folder === homeView.folder) && (!q || (m.name || 'Untitled').toLowerCase().includes(q)));
+  const cmp = { updated: (a, b) => (b.updated || 0) - (a.updated || 0), name: (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' }), created: (a, b) => createdAt(b) - createdAt(a), oldest: (a, b) => createdAt(a) - createdAt(b) }[by];
+  list = list.slice().sort(cmp);
   const grid = $('#projGrid'); grid.innerHTML = '';
   list.forEach((m, i) => { const c = projectCard(m); c.style.setProperty('--i', Math.min(i, 12)); grid.append(c); });
+  const none = $('#homeNone'); none.hidden = !homeList.length || list.length > 0;
+  none.textContent = q ? `No projects match “${homeView.q.trim()}”${homeView.folder ? ' in this folder' : ''}.` : 'This folder is empty. Drag projects onto its name, or use a project’s folder button.';
 }
+const folderIcon = '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+function renderFolders() {
+  const box = $('#homeFolders'); box.innerHTML = '';
+  const chip = (label, folder, count) => {
+    const b = el('button', 'hf-chip' + (homeView.folder === folder ? ' on' : ''), folder ? folderIcon : '');
+    const t = el('span'); t.textContent = label; const n = el('small'); n.textContent = count; b.append(t, n);
+    b.onclick = () => { homeView.folder = folder; renderFolders(); renderGrid(); };
+    if (folder) b.ondblclick = () => renameFolder(folder);
+    // drop a project card on a folder to move it there ("All projects" takes it out of its folder)
+    b.ondragover = (e) => { if (e.dataTransfer.types.includes('stitch/project')) { e.preventDefault(); b.classList.add('drop'); } };
+    b.ondragleave = () => b.classList.remove('drop');
+    b.ondrop = (e) => { e.preventDefault(); b.classList.remove('drop'); const id = e.dataTransfer.getData('stitch/project'); if (id) moveToFolder(id, folder); };
+    return b;
+  };
+  box.append(chip('All projects', null, homeList.length));
+  for (const f of allFolders()) box.append(chip(f, f, homeList.filter(m => m.folder === f).length));
+  const add = el('button', 'hf-chip hf-add', '<svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg>'); add.title = 'New folder'; add.onclick = () => newFolder();
+  box.append(add);
+  if (homeView.folder) {
+    const f = homeView.folder;
+    const ren = el('button', 'hf-tool'); ren.textContent = 'Rename'; ren.onclick = () => renameFolder(f);
+    const del = el('button', 'hf-tool'); del.textContent = 'Delete folder'; del.onclick = () => deleteFolder(f);
+    box.append(ren, del);
+  }
+}
+function folderNameDlg(title, initial, okLabel, onName) {
+  const body = el('div', 'newproj'), row = el('label', 'np-row'), inp = el('input'); row.textContent = 'Name';
+  inp.type = 'text'; inp.value = initial; inp.maxLength = 60; inp.spellcheck = false; row.append(inp); body.append(row);
+  const h = dlg(title, body, { okLabel, center: true, outsideClose: true, onOk: () => {
+    const v = inp.value.trim(); if (!v) return false;
+    if (v !== initial && allFolders().includes(v)) { toast(`There is already a folder called “${v}”`); return false; }
+    onName(v);
+  } });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); h.wrap.querySelector('.pill.primary').click(); } };
+  setTimeout(() => { inp.focus(); inp.select(); });
+}
+function newFolder(thenMove) {
+  folderNameDlg('New folder', 'New folder', 'Create', async (v) => {
+    setSavedFolders([...savedFolders(), v]);
+    if (thenMove) await moveToFolder(thenMove, v); else { homeView.folder = v; renderFolders(); renderGrid(); }
+  });
+}
+function renameFolder(f) {
+  folderNameDlg('Rename folder', f, 'Rename', async (v) => {
+    if (v === f) return;
+    for (const m of homeList.filter(x => x.folder === f)) await lib.setFolder(m.id, v);
+    setSavedFolders([...savedFolders().filter(x => x !== f), v]);
+    if (homeView.folder === f) homeView.folder = v;
+    await renderHome();
+  });
+}
+function deleteFolder(f) {
+  const n = homeList.filter(m => m.folder === f).length;
+  confirmDlg('Delete folder', n ? `Delete the folder “${f}”? Its ${n} project${n === 1 ? '' : 's'} stay${n === 1 ? 's' : ''} in All projects.` : `Delete the folder “${f}”?`, 'Delete', async () => {
+    for (const m of homeList.filter(x => x.folder === f)) await lib.setFolder(m.id, null);
+    setSavedFolders(savedFolders().filter(x => x !== f));
+    homeView.folder = null; await renderHome();
+  });
+}
+async function moveToFolder(id, folder) {
+  const m = homeList.find(x => x.id === id); if (!m || (m.folder || null) === folder) return;
+  try { await lib.setFolder(id, folder); } catch (err) { toast('Could not move: ' + err.message); return; }
+  if (folder) setSavedFolders([...savedFolders(), folder]);
+  toast(folder ? `Moved “${m.name}” to ${folder}` : `Took “${m.name}” out of ${m.folder}`);
+  await renderHome();
+}
+function folderMenu(m, anchor) {
+  const box = el('div', 'hf-menu');
+  const item = (label, fn, on) => { const b = el('button', on ? 'on' : ''); b.textContent = label; b.onclick = () => { closePop(); fn(); }; box.append(b); };
+  item('No folder', () => moveToFolder(m.id, null), !m.folder);
+  for (const f of allFolders()) item(f, () => moveToFolder(m.id, f), m.folder === f);
+  item('New folder…', () => newFolder(m.id));
+  openPop(anchor, box);
+}
+$('#homeSearch').oninput = () => { homeView.q = $('#homeSearch').value; renderGrid(); };
+$('#homeSearch').onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Escape') { $('#homeSearch').value = ''; homeView.q = ''; renderGrid(); $('#homeSearch').blur(); } };
+$('#homeSort').value = homeView.sort;
+$('#homeSort').onchange = () => { homeView.sort = $('#homeSort').value; store.set('stitch-home-sort', homeView.sort); renderGrid(); };
 function projectCard(m) {
   const card = el('div', 'proj'); card.tabIndex = 0;
   const th = el('div', 'proj-thumb' + (m.kind === 'canvas' ? '' : ' tpl'));
@@ -3547,16 +4011,22 @@ function projectCard(m) {
   if (state.sets.some(s => s.id === m.id && !s.temp)) { const b = el('span', 'proj-open'); b.textContent = 'Open'; th.append(b); }
   const info = el('div', 'proj-info'), nm = el('div', 'proj-name'), meta = el('div', 'proj-meta');
   nm.textContent = m.name || 'Untitled'; nm.title = nm.textContent;
-  meta.textContent = `${m.kind === 'canvas' ? `${m.width} × ${m.height}` : 'Shirt + pants template'} · ${timeAgo(m.updated)}`;
+  meta.textContent = `${m.kind === 'canvas' ? `${m.width} × ${m.height}` : 'Shirt + pants template'} · ${timeAgo(m.updated)}${m.folder && !homeView.folder ? ' · ' + m.folder : ''}`;
   info.append(nm, meta);
   const acts = el('div', 'proj-acts');
   const act = (cls, svg, title, fn) => { const b = el('button', 'proj-act ' + cls, svg); b.title = title; b.onclick = (e) => { e.stopPropagation(); fn(); }; return b; };
+  const fBtn = act('', folderIcon, 'Move to folder', () => folderMenu(m, fBtn));
+  acts.append(fBtn);
+  if (lib.versions) acts.append(act('', '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v4h4"/><path d="M12 8v4l3 2"/></svg>', 'Version history', () => openVersions(m)));
   acts.append(
     act('', '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>', 'Duplicate', () => duplicateProject(m)),
     act('danger', '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>', 'Delete', () => deleteProject(m)),
   );
   card.append(th, info, acts);
   card.onclick = () => openProject(m.id);
+  card.draggable = true;
+  card.ondragstart = (e) => { e.dataTransfer.setData('stitch/project', m.id); e.dataTransfer.effectAllowed = 'move'; card.classList.add('dragging'); };
+  card.ondragend = () => card.classList.remove('dragging');
   card.onkeydown = (e) => { if (e.key === 'Enter') openProject(m.id); else if (e.key === 'Delete') deleteProject(m); };
   return card;
 }
@@ -3567,6 +4037,54 @@ async function openProject(id) {
     const txt = await lib.read(id); if (!txt) throw new Error('the project file is missing');
     addSet(await buildSet(JSON.parse(txt), 'Untitled', id), false);
   } catch (err) { toast('Could not open: ' + err.message); }
+}
+// ---- version history: earlier copies of a project, kept by main.js ("Version history")
+function whenText(t) {
+  const d = new Date(t), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return 'Today, ' + time;
+  if (d.toDateString() === y.toDateString()) return 'Yesterday, ' + time;
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' }) + ', ' + time;
+}
+const sizeText = (b) => b < 1e6 ? Math.max(1, Math.round(b / 1e3)) + ' KB' : (b / 1e6).toFixed(1) + ' MB';
+async function openVersions(m) {
+  if (!lib.versions) return;
+  await saveDirty();
+  let list = []; try { list = await lib.versions(m.id); } catch (err) { toast('Could not read the history: ' + err.message); return; }
+  const body = el('div', 'versions');
+  const intro = el('p', 'np-note'); intro.textContent = 'Earlier copies of this project, kept as you work: every one from the last hour, one an hour for the last day, then one a day. Up to 20 copies.';
+  body.append(intro);
+  if (!list.length) { const p = el('p', 'ver-empty'); p.textContent = 'No earlier copies yet. One is kept each time you work on the project for more than 10 minutes.'; body.append(p); }
+  const rows = el('div', 'ver-list');
+  for (const v of list) {
+    const row = el('div', 'ver-row'), info = el('div', 'ver-info'), a = el('div', 'ver-when'), b = el('div', 'ver-meta');
+    a.textContent = whenText(v.time); b.textContent = `${timeAgo(v.time)} · ${sizeText(v.size)}`; info.append(a, b);
+    const copy = el('button', 'mini'); copy.textContent = 'Open as copy'; copy.onclick = () => { h.close(); openVersionCopy(m, v); };
+    const rest = el('button', 'mini primary'); rest.textContent = 'Restore'; rest.onclick = () => { h.close(); restoreVersion(m, v); };
+    row.append(info, copy, rest); rows.append(row);
+  }
+  body.append(rows);
+  const h = dlg(`Version history - ${m.name || 'Untitled'}`, body, { noFoot: true, center: true, outsideClose: true });
+}
+async function openVersionCopy(m, v) {
+  try {
+    const data = JSON.parse(await lib.versionRead(m.id, v.file)); data.name = `${m.name || 'Untitled'} (${whenText(v.time)})`;
+    const st = await buildSet(data, data.name); st.id = newProjectId(); addSet(st);
+    toast(`Opened the copy from ${whenText(v.time)} as a new project`);
+  } catch (err) { toast('Could not open that copy: ' + err.message); }
+}
+function restoreVersion(m, v) {
+  confirmDlg('Restore this version', `Put “${m.name}” back to how it was on ${whenText(v.time)}? The way it is now is kept in its history, so you can undo this from there.`, 'Restore', async () => {
+    try {
+      const data = JSON.parse(await lib.versionRead(m.id, v.file));
+      await saveDirty(); await lib.snapshot(m.id); // keep the current state as a version first
+      const i = state.sets.findIndex(s => s.id === m.id && !s.temp), wasActive = i >= 0 && i === state.setIdx && !homeOpen();
+      if (i >= 0) { state.sets[i].temp = true; closeSet(i); } // temp: closing it mustn't save over the restore
+      data.name = m.name; const st = await buildSet(data, m.name, m.id); await saveProject(st);
+      if (i >= 0) { addSet(st, false); if (!wasActive) await showHome(); } else await renderHome();
+      toast(`Restored “${m.name}” to ${whenText(v.time)}`);
+    } catch (err) { toast('Could not restore: ' + err.message); }
+  });
 }
 async function duplicateProject(m) {
   try {
@@ -3686,7 +4204,7 @@ function showWhatsNew(ver, items) {
   await templateImg.decode().catch(() => {});
   const { hadData } = await loadSession();
   const cur = state.sets[state.setIdx]; state.docs = cur.docs; state.swatches = cur.swatches; applySize(cur.w || TW, cur.h || TH);
-  buildRegionSelect(); setTool('brush'); renderTabs(); setMode(cur.mode || 'shirt'); rebuildLayers(); changed();
+  rebuildKeyMap(); buildRegionSelect(); setTool('brush'); renderTabs(); setMode(cur.mode || 'shirt'); rebuildLayers(); changed();
   for (const s of state.sets) s.dirty = false; // just loaded - nothing to save yet
   sessionReady = true; saveDirty();
   requestAnimationFrame(zoomFit);
@@ -3697,3 +4215,5 @@ function showWhatsNew(ver, items) {
 $('#btnFullscreen').onclick = () => { $('#panelsMenu').hidden = true; if (native?.toggleFullscreen) native.toggleFullscreen(); else if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); };
 // F11 normally never reaches the page (main.js toggles fullscreen first); this is the fallback
 document.addEventListener('keydown', (e) => { if (e.key === 'F11' && !e.repeat) { e.preventDefault(); $('#btnFullscreen').click(); } }, true);
+window.__stitchPx = (x, y, mode) => [...(mode ? state.docs[mode] : doc()).layers.find(l => l.id === (mode ? state.docs[mode] : doc()).activeId).ctx.getImageData(x, y, 1, 1).data];
+window.__stitchComp = (x, y) => { compositeDoc(doc()); return [...doc().comp.getContext('2d').getImageData(x, y, 1, 1).data]; };
