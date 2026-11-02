@@ -1,4 +1,4 @@
-import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, EDGES, acrossSeam, seamMatrix, faceAt, ALL_FACES, MIRROR_FACES } from './template.js';
+import { W as TW, H as TH, PARTS, FACE_ORDER, regionsFor as templateRegions, regionAt as templateRegionAt, boundsOf, EDGES, acrossSeam, seamMatrix, faceAt, ALL_FACES, MIRROR_FACES, FACES } from './template.js';
 import { CHANGELOG } from './changelog.js';
 import { createPreview } from './preview.js';
 
@@ -2549,6 +2549,27 @@ function mirrorLimb(from, to) {
   commitOp(o);
   toast(`Copied ${from} ${state.mode === 'pants' ? 'leg' : 'arm'} onto the ${to}, mirrored`);
 }
+// Symmetrize: make the layer match on both sides by copying one side onto the other, flipped. Templates go by the
+// character's sides (as labelled on the template: the Right Arm block is the right); a normal canvas by its halves.
+function symmetrize(from) {
+  const o = beginOp(); if (!o) return;
+  const snap = snapCanvas(o.before), c = o.l.ctx;
+  const copy = (sx, sy, sw, sh, dx, dy) => { c.clearRect(dx, dy, sw, sh); c.save(); c.translate(dx + sw, dy); c.scale(-1, 1); c.drawImage(snap, sx, sy, sw, sh, 0, 0, sw, sh); c.restore(); };
+  if (!isTemplate()) { const hw = Math.floor(W / 2); if (from === 'left') copy(0, 0, hw, H, W - hw, 0); else copy(W - hw, 0, hw, H, 0, 0); }
+  else ALL_FACES.forEach((f, i) => {
+    const { from: [fx, fy, fw, fh], to: [tx, ty] } = MIRROR_FACES[i];
+    const side = f.part === 'torso' ? { R: 'right', L: 'left' }[f.face] : f.part;
+    if (side) { if (side === from) copy(fx, fy, fw, fh, tx, ty); return; }
+    // a face down the middle of the body (torso front, back, top, bottom): one half onto the other
+    const half = fw / 2, rightOnLeft = FACES[f.face].c[0][0] < 0; // the character's right is the half at the face's -X corner
+    const srcLeft = (from === 'right') === rightOnLeft;
+    copy(srcLeft ? fx : fx + half, fy, half, fh, srcLeft ? fx + half : fx, fy);
+  });
+  commitOp(o);
+  toast(isTemplate() ? `Copied the ${from} ${state.mode === 'pants' ? 'leg' : 'arm'} and the ${from} side of the torso onto the other side, flipped` : `Copied the ${from} half onto the other half, flipped`);
+}
+$('#lySymRL').onclick = () => labelled('Symmetrize', () => symmetrize('right'));
+$('#lySymLR').onclick = () => labelled('Symmetrize', () => symmetrize('left'));
 $('#lyMirrorRL').onclick = () => labelled('Mirror limb', () => mirrorLimb('right', 'left'));
 $('#lyMirrorLR').onclick = () => labelled('Mirror limb', () => mirrorLimb('left', 'right'));
 
@@ -2865,6 +2886,8 @@ const COMMANDS = [
   { id: 'layerDown', group: 'Layers', label: 'Move layer down', key: 'Ctrl+[', run: () => $('#lyDown').click() },
   { id: 'lock', group: 'Layers', label: 'Lock / unlock layer', key: 'Ctrl+/', run: toggleLock },
   { id: 'mirror', group: 'Layers', label: 'Mirror on / off', key: 'Shift+M', run: () => toggleMirror() },
+  { id: 'symRL', group: 'Layers', label: 'Symmetrize right → left', key: '', run: () => $('#lySymRL').click() },
+  { id: 'symLR', group: 'Layers', label: 'Symmetrize left → right', key: '', run: () => $('#lySymLR').click() },
   { id: 'zoomIn', group: 'View', label: 'Zoom in', key: '=', also: ['+'], run: () => setZoom(state.zoom * 1.25) },
   { id: 'zoomOut', group: 'View', label: 'Zoom out', key: '-', run: () => setZoom(state.zoom / 1.25) },
   { id: 'zoomFit', group: 'View', label: 'Fit to window', key: '0', also: ['Ctrl+0'], run: zoomFit },
@@ -3478,6 +3501,8 @@ const MENUS = [
     '-',
     { label: 'Flip layer horizontal', run: () => flipLayer(true) },
     { label: 'Flip layer vertical', run: () => flipLayer(false) },
+    { label: 'Symmetrize right → left', cmd: 'symRL', run: () => $('#lySymRL').click() },
+    { label: 'Symmetrize left → right', cmd: 'symLR', run: () => $('#lySymLR').click() },
     { label: 'Mirror right → left limb', run: () => $('#lyMirrorRL').click(), off: () => !isTemplate() },
     { label: 'Mirror left → right limb', run: () => $('#lyMirrorLR').click(), off: () => !isTemplate() },
     { label: 'Clear layer (region)', run: () => $('#lyClear').click() },
@@ -3514,7 +3539,7 @@ for (const m of MENUS) for (const it of m.items) if (it !== '-' && MENU_CMDS[it.
 
 // menu actions that only work on pixels are greyed out while text, a shape or a colour fill is selected
 const pixelsOnly = () => !doc().noSel && !!activeLayer()?.vec;
-const RASTER_ONLY = ['Clear layer (region)', 'Mirror right → left limb', 'Mirror left → right limb', 'Cut', 'Delete selected pixels'];
+const RASTER_ONLY = ['Clear layer (region)', 'Symmetrize right → left', 'Symmetrize left → right', 'Mirror right → left limb', 'Mirror left → right limb', 'Cut', 'Delete selected pixels'];
 for (const m of MENUS) for (const it of m.items) if (it !== '-' && it.run && (m.label === 'Adjustment' || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
 const menubar = $('#menubar');
 let openMenu = null;
@@ -3749,6 +3774,7 @@ $('#lyMenuBtn').onclick = (e) => {
   const px = pixelsOnly(); // these change pixels, so they're greyed out on text/shape/fill layers
   for (const id of ['lyAdjust', 'lyClear']) { $('#' + id).disabled = px; $('#' + id).title = px ? 'Needs a plain image layer - use Layer → Rasterize layer first' : ''; }
   for (const id of ['lyMirrorRL', 'lyMirrorLR']) $('#' + id).disabled = px || !isTemplate();
+  for (const id of ['lySymRL', 'lySymLR']) $('#' + id).disabled = px;
 };
 $('#lyMenu').addEventListener('click', () => { $('#lyMenu').hidden = true; });
 document.addEventListener('click', (e) => {
