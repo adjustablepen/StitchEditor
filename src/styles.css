@@ -827,3 +827,6 @@ body.pair-view #otherView { display: block; }
 .mb-drop.mb-sub { display: flex; flex-direction: column; position: fixed; z-index: 61; min-width: 200px; animation: drop-in .12s var(--ease-out); }
 .mb-entry.has-sub kbd { font-size: 15px; line-height: 1; }
 .mb-entry.sub-open { background: var(--panel2); }
+/* the adjustment layer menu opens above its button on the right of the Layers footer */
+.layer-menu.adj-menu { left: auto; right: 6px; }
+.layer-menu.adj-menu:not([hidden]) { transform-origin: bottom right; }

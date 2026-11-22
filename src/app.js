@@ -2661,7 +2661,7 @@ function flattenInto(target, layers) {
 }
 $('#lyMerge').onclick = () => structOp(() => {
   const d = doc();
-  if (d.activeGroup) { const g = d.groups.find(x => x.id === d.activeGroup), mem = groupMembers(g.id), m = makeLayer(g.name); flattenInto(m, mem); d.layers.splice(d.layers.indexOf(mem[mem.length - 1]) + 1, 0, m); d.layers = d.layers.filter(l => !mem.includes(l)); d.activeId = m.id; d.activeGroup = null; d.sel = new Set([m.id]); normalizeGroups(d); return; }
+  if (d.activeGroup) { const g = d.groups.find(x => x.id === d.activeGroup), mem = groupMembers(g.id), m = makeLayer(g.name); flattenInto(m, mem); m.blend = g.blend || 'source-over'; m.opacity = g.opacity ?? 1; /* looks the same as the group did */ d.layers.splice(d.layers.indexOf(mem[mem.length - 1]) + 1, 0, m); d.layers = d.layers.filter(l => !mem.includes(l)); d.activeId = m.id; d.activeGroup = null; d.sel = new Set([m.id]); normalizeGroups(d); return; }
   const a = activeLayer(), i = d.layers.indexOf(a); if (i === 0) return false;
   const below = d.layers[i - 1], c = below.ctx;
   if (isAdj(below)) { toast('Can’t merge into an adjustment layer - it has no pixels. Merge the adjustment down onto a picture layer instead.'); return false; }
