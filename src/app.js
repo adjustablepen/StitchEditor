@@ -93,9 +93,87 @@ function layerSource(l) {
   return maskScratch;
 }
 function newMask(w, h, fill = '#fff') { const c = mkCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true }); x.fillStyle = fill; x.fillRect(0, 0, w, h); return c; }
-const maskEditing = (l, d = doc()) => !!l?.mask && d.maskEdit === l.id && !d.noSel;
+// an adjustment layer always paints its mask (it has no pixels of its own)
+const maskEditing = (l, d = doc()) => !!l?.mask && (d.maskEdit === l.id || isAdj(l)) && !d.noSel;
+
+// ---- adjustment layers: l.vec = { type: 'adj', adj: 'bc' | 'hs' | 'curves' | 'temp', p: {...settings} }. They hold no
+// pixels. When the picture is put together they change everything below them (inside a group, only the rest of that
+// group), as much as their opacity and mask allow. The change is an SVG filter, so it runs on the GPU and painting
+// under an adjustment stays fast.
+const isAdj = (l) => l?.vec?.type === 'adj';
+const ADJ_LAYERS = {
+  bc: { title: 'Brightness and contrast', short: 'Brightness / contrast', name: 'Brightness / Contrast' },
+  hs: { title: 'Hue / Saturation', short: 'Hue / saturation', name: 'Hue / Saturation' },
+  curves: { title: 'Curves', short: 'Curves', name: 'Curves' },
+  temp: { title: 'Temperature and tint', short: 'Temperature / tint', name: 'Temperature / Tint' },
+};
+const SVGNS = 'http://www.w3.org/2000/svg', svgEl = (n) => document.createElementNS(SVGNS, n);
+const adjSvg = svgEl('svg'); adjSvg.setAttribute('width', '0'); adjSvg.setAttribute('height', '0'); adjSvg.setAttribute('aria-hidden', 'true'); adjSvg.style.position = 'absolute';
+document.body.append(adjSvg);
+const adjFilters = new Map(); let adjFilterN = 0; // settings → { el, url } (url null when the settings change nothing)
+const curveIdentity = (pts) => !pts || pts.length === 2 && pts[0][0] === 0 && pts[0][1] === 0 && pts[1][0] === 255 && pts[1][1] === 255;
+// the filter steps for an adjustment's settings
+function adjPrims(v) {
+  const p = v.p || {}, out = [], tbl = (L) => Array.from(L, x => +(x / 255).toFixed(4)).join(' ');
+  const transfer = (R, G, B) => { const e = svgEl('feComponentTransfer'); for (const [n, L] of [['feFuncR', R], ['feFuncG', G], ['feFuncB', B]]) { const f = svgEl(n); f.setAttribute('type', 'table'); f.setAttribute('tableValues', tbl(L)); e.append(f); } return e; };
+  const matrix = (type, values) => { const e = svgEl('feColorMatrix'); e.setAttribute('type', type); e.setAttribute('values', String(values)); return e; };
+  if (v.adj === 'curves') {
+    if (['rgb', 'r', 'g', 'b'].every(k => curveIdentity(p[k]))) return out;
+    const M = curveLUT(p.rgb || []), ch = (k) => { const L = curveLUT(p[k] || []); return L.map(x => M[x]); };
+    out.push(transfer(ch('r'), ch('g'), ch('b')));
+  } else if (v.adj === 'bc' || v.adj === 'temp') {
+    if (ADJ[v.adj].sliders.every(([k, , , , d]) => (p[k] ?? d) === d)) return out;
+    out.push(transfer(...ADJ[v.adj].lut(p)));
+  } else if (v.adj === 'hs') {
+    const lf = (p.light || 0) / 100;
+    if (p.colorize) { // every colour becomes the chosen hue at its own brightness: grey first, then a table per channel
+      out.push(matrix('matrix', '0.299 0.587 0.114 0 0 0.299 0.587 0.114 0 0 0.299 0.587 0.114 0 0 0 0 0 1 0'));
+      const h = (((p.hue || 0) % 360) + 360) % 360 / 360, s = Math.max(0, Math.min(1, ((p.sat || 0) + 100) / 200)), R = new Uint8ClampedArray(256), G = new Uint8ClampedArray(256), B = new Uint8ClampedArray(256);
+      for (let i = 0; i < 256; i++) { let l = i / 255; l = lf > 0 ? l + (1 - l) * lf : l + l * lf; const o = hsl2rgb(h, s, l); R[i] = o[0]; G[i] = o[1]; B[i] = o[2]; }
+      out.push(transfer(R, G, B)); return out;
+    }
+    if (p.hue) out.push(matrix('hueRotate', p.hue));
+    if (p.sat) out.push(matrix('saturate', p.sat < 0 ? 1 + p.sat / 100 : 1 + p.sat / 50));
+    if (lf) { const e = svgEl('feComponentTransfer'); for (const n of ['feFuncR', 'feFuncG', 'feFuncB']) { const f = svgEl(n); f.setAttribute('type', 'linear'); f.setAttribute('slope', String(lf > 0 ? 1 - lf : 1 + lf)); f.setAttribute('intercept', String(lf > 0 ? lf : 0)); e.append(f); } out.push(e); }
+  }
+  return out;
+}
+function adjFilterUrl(v) {
+  const key = JSON.stringify([v.adj, v.p]); let f = adjFilters.get(key);
+  if (f) { adjFilters.delete(key); adjFilters.set(key, f); return f.url; } // most recently used last
+  const prims = adjPrims(v);
+  if (!prims.length) f = { el: null, url: null };
+  else { const el_ = svgEl('filter'); el_.id = 'adjf' + (++adjFilterN); el_.setAttribute('color-interpolation-filters', 'sRGB'); el_.append(...prims); adjSvg.append(el_); f = { el: el_, url: `url(#${el_.id})` }; }
+  adjFilters.set(key, f);
+  if (adjFilters.size > 64) { const [k0, f0] = adjFilters.entries().next().value; adjFilters.delete(k0); f0.el?.remove(); } // dragging a slider makes many
+  return f.url;
+}
+const fitScratch = (c, w, h) => { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } return c; };
+const adjScr = [mkCanvas(1, 1), mkCanvas(1, 1)], groupScr = mkCanvas(1, 1);
+// changes what is already on c: below × (1 - k) + adjusted × k, where k = the layer's opacity × its mask
+function applyAdj(c, l) {
+  const url = adjFilterUrl(l.vec); if (!url) return;
+  const w = c.canvas.width, h = c.canvas.height, f = fitScratch(adjScr[0], w, h), fx = f.getContext('2d');
+  fx.save(); fx.clearRect(0, 0, w, h); fx.globalAlpha = 1; fx.globalCompositeOperation = 'source-over'; fx.filter = url; fx.drawImage(c.canvas, 0, 0); fx.restore();
+  const masked = !!l.mask && !l.maskOff, k = l.opacity ?? 1;
+  c.save(); c.globalAlpha = 1;
+  if (!masked && k >= 1) { c.clearRect(0, 0, w, h); c.globalCompositeOperation = 'source-over'; c.drawImage(f, 0, 0); c.restore(); return; }
+  const kc = fitScratch(adjScr[1], w, h), kx = kc.getContext('2d');
+  kx.save(); kx.clearRect(0, 0, w, h); kx.globalAlpha = k; kx.globalCompositeOperation = 'source-over';
+  if (masked) kx.drawImage(maskAlpha(l), 0, 0, w, h); else { kx.fillStyle = '#000'; kx.fillRect(0, 0, w, h); }
+  kx.restore();
+  fx.save(); fx.globalCompositeOperation = 'destination-in'; fx.drawImage(kc, 0, 0); fx.restore();
+  c.globalCompositeOperation = 'destination-out'; c.drawImage(kc, 0, 0);
+  c.globalCompositeOperation = 'lighter'; c.drawImage(f, 0, 0);
+  c.restore();
+}
+function drawLayerOn(c, l) {
+  if (!l.visible || l.opacity <= 0) return;
+  if (isAdj(l)) { if (!l._adjOff) applyAdj(c, l); return; } // _adjOff: held off by the "compare" button while editing
+  c.globalAlpha = l.opacity; c.globalCompositeOperation = l.blend; c.drawImage(layerSource(l), 0, 0);
+}
 // draws a list of layers onto ctx c; layers in a group are flattened on their own first, so blend modes
-// like "clip to below" or "erase" inside a group only affect the rest of that group
+// like "clip to below" or "erase" and adjustment layers inside a group only affect the rest of that group
 function compositeLayers(c, layers, groups) {
   c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
   for (let i = 0; i < layers.length;) {
@@ -103,13 +181,15 @@ function compositeLayers(c, layers, groups) {
     if (g) {
       let j = i; while (j < layers.length && layers[j].group === gid) j++;
       if (g.visible !== false && (g.opacity ?? 1) > 0) {
-        const tc = mkCanvas(c.canvas.width, c.canvas.height), tx = tc.getContext('2d');
-        for (let k = i; k < j; k++) { const m = layers[k]; if (!m.visible || m.opacity <= 0) continue; tx.globalAlpha = m.opacity; tx.globalCompositeOperation = m.blend; tx.drawImage(layerSource(m), 0, 0); }
-        c.globalAlpha = g.opacity ?? 1; c.globalCompositeOperation = 'source-over'; c.drawImage(tc, 0, 0);
+        const tc = fitScratch(groupScr, c.canvas.width, c.canvas.height), tx = tc.getContext('2d');
+        tx.globalAlpha = 1; tx.globalCompositeOperation = 'source-over'; tx.clearRect(0, 0, tc.width, tc.height);
+        for (let k = i; k < j; k++) drawLayerOn(tx, layers[k]);
+        tx.globalAlpha = 1; tx.globalCompositeOperation = 'source-over';
+        c.globalAlpha = g.opacity ?? 1; c.globalCompositeOperation = g.blend || 'source-over'; c.drawImage(tc, 0, 0);
       }
       i = j; continue;
     }
-    if (l.visible && l.opacity > 0) { c.globalAlpha = l.opacity; c.globalCompositeOperation = l.blend; c.drawImage(layerSource(l), 0, 0); }
+    drawLayerOn(c, l);
     i++;
   }
   c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
@@ -312,6 +392,7 @@ function beginOp(opts = {}) {
     const mx = l.mask.getContext('2d', { willReadFrequently: true });
     return { l: { id: l.id, name: l.name, canvas: l.mask, ctx: mx, visible: true }, before: mx.getImageData(0, 0, W, H), maskOf: l };
   }
+  if (isAdj(l)) { toast(l.mask ? 'Adjustment layers have no pixels of their own - paint on them to choose where they apply (black hides)' : 'Add a mask (Layer → Mask) to choose where this adjustment applies'); return null; }
   if (l.vec?.type === 'fill' && !opts.raster) {
     const m = mkCanvas(); m.getContext('2d').drawImage(maskCanvas(l.vec.mask), 0, 0);
     const proxy = { id: l.id, name: l.name, canvas: m, ctx: ctxOf(m), visible: true };
@@ -848,6 +929,7 @@ function ensureArr() {
     const v = l.vec; if (arr.vec && !arr.path && v && v.type !== 'fill' && !op?.arr) Object.assign(arr, { x: v.x, y: v.y, w: Math.max(1, v.w), h: Math.max(1, v.h), angle: v.angle || 0, flipX: !!v.flipX, flipY: !!v.flipY });
     return arr;
   }
+  if (isAdj(l)) { arr = { layerId: l.id, version: editVersion, empty: true }; return arr; } // covers the whole picture: nothing to move
   if (l.vec?.type === 'path') { const b = pathBBox(allPts(l.vec)); arr = { layerId: l.id, version: editVersion, vec: true, path: true, x: b.x, y: b.y, w: b.w, h: b.h, angle: 0, flipX: false, flipY: false }; return arr; }
   if (l.vec && l.vec.type !== 'fill') { const v = l.vec; arr = { layerId: l.id, version: editVersion, vec: true, x: v.x, y: v.y, w: Math.max(1, v.w), h: Math.max(1, v.h), angle: v.angle || 0, flipX: !!v.flipX, flipY: !!v.flipY }; return arr; }
   const srcL = l.vec?.type === 'fill' ? { ctx: maskCanvas(l.vec.mask).getContext('2d'), canvas: maskCanvas(l.vec.mask) } : l;
@@ -887,7 +969,7 @@ function renderArr(o) {
   c.imageSmoothingQuality = 'high'; c.drawImage(a.src, -a.w / 2, -a.h / 2, a.w, a.h); c.restore(); if (o.real) renderFill(o.real, o.l.canvas); requestRender();
 }
 function arrCommit(o, label) { labelled(label, () => commitOp(o)); if (arr.path) arr = null; else arr.version = editVersion; syncArrInputs(); }
-function arrApply(label, fn) { const a = ensureArr(); if (a.empty) { toast('This layer is empty'); return; } const o = beginOp({ vec: !!a.vec }); if (!o) return; fn(a); renderArr(o); arrCommit(o, label); drawOverlay(); }
+function arrApply(label, fn) { const a = ensureArr(); if (a.empty) { toast(isAdj(activeLayer()) ? 'Adjustment layers cover the whole picture, so they can’t be moved or flipped' : 'This layer is empty'); return; } const o = beginOp({ vec: !!a.vec }); if (!o) return; fn(a); renderArr(o); arrCommit(o, label); drawOverlay(); }
 function arrHandles(a) {
   const pts = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]], cs = Math.cos(a.angle), sn = Math.sin(a.angle), cx = a.x + a.w / 2, cy = a.y + a.h / 2;
   const tr = (u, v) => ({ x: cx + u * cs - v * sn, y: cy + u * sn + v * cs });
@@ -1038,6 +1120,7 @@ function aabbOf(a) { const c = arrHandles(a).corners, xs = c.map(q => q.x), ys =
 function layerBounds(l) {
   const v = l.vec;
   if (v?.type === 'path') { const b = pathBBox(allPts(v)); return [b.x, b.y, b.w, b.h]; }
+  if (v?.type === 'adj') return null;
   if (v && v.type !== 'fill') { const b = aabbOf({ x: v.x, y: v.y, w: v.w, h: v.h, angle: v.angle || 0 }); return [b.x, b.y, b.w, b.h]; }
   return contentBounds(l);
 }
@@ -1126,7 +1209,7 @@ function drawToolOverlay(o) {
   } else if (state.tool === 'move' && !doc().noSel) drawArrBox(o);
   const vt = state.tool === 'text' || state.tool === 'shape' ? activeLayer()?.vec?.type : null;
   if ((state.tool === 'text' || state.tool === 'shape') && vt === state.tool && !doc().noSel && !(op && !op.viaArr) && !(vt === 'shape' && state.shape.mode === 'draw') && !(vt === 'text' && textEdit)) drawArrBox(o); // while typing: outline only
-  else if ((state.tool === 'text' || state.tool === 'shape') && activeLayer()?.vec && !doc().noSel && activeLayer().vec.type !== 'fill') {
+  else if ((state.tool === 'text' || state.tool === 'shape') && activeLayer()?.vec && !doc().noSel && activeLayer().vec.type !== 'fill' && !isAdj(activeLayer())) {
     const v = activeLayer().vec, cx = v.x + v.w / 2, cy = v.y + v.h / 2;
     o.save(); o.translate(cx, cy); o.rotate(v.angle || 0); o.lineWidth = 1 / state.zoom; o.strokeStyle = textEdit ? '#0099cc' : 'rgba(0,153,204,.7)'; o.setLineDash(textEdit ? [] : [4 / state.zoom, 3 / state.zoom]); o.strokeRect(-v.w / 2 - 2, -v.h / 2 - 2, v.w + 4, v.h + 4); o.restore(); o.setLineDash([]);
   }
@@ -1604,6 +1687,7 @@ function renderTextCanvas(v) {
 function renderVec(l) {
   if (l.vec.type === 'fill') { renderFill(l); return; }
   if (l.vec.type === 'path') { renderPath(l); return; }
+  if (l.vec.type === 'adj') return; // adjustment layers have no pixels
   const v = l.vec, c = l.ctx; c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H);
   if (v.type === 'shape') drawShapeVec(c, v);
   else {
@@ -1987,8 +2071,9 @@ async function blobToB64(blob) { const u8 = new Uint8Array(await blob.arrayBuffe
 const canvasBlob = (c, type = 'image/png', q) => new Promise(res => c.toBlob(res, type, q));
 async function exportPxz() {
   endTextEdit(); flushVecEdit();
-  const d = doc(), entries = [], stack = [];
+  const d = doc(), entries = [], stack = [], skipped = d.layers.filter(isAdj).length;
   for (const l of d.layers) {
+    if (isAdj(l)) continue; // Pixlr files can't hold them
     const b = contentBounds(l) || [0, 0, 1, 1], c = mkCanvas(b[2], b[3]); c.getContext('2d').drawImage(layerSource(l), -b[0], -b[1]);
     const id = Math.random().toString(16).slice(2, 14).padEnd(12, '0') + '.png';
     entries.push({ name: id, data: new Uint8Array(await (await canvasBlob(c)).arrayBuffer()) });
@@ -2002,7 +2087,8 @@ async function exportPxz() {
   const man = { id: crypto.randomUUID(), name, type: 'document', unit: 'pixel', width: W, height: H, stack };
   const all = [{ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(man)) }, { name: 'thumbnail.webp', data: new Uint8Array(await (await canvasBlob(th, 'image/webp', .8)).arrayBuffer()) }, ...entries];
   const blob = zipStore(all), b64 = await blobToB64(blob);
-  if (native) { const p = await native.saveFile({ defaultPath: pxzName, filters: [{ name: 'Pixlr document', extensions: ['pxz'] }], data: b64, encoding: 'base64' }); if (p) toast('Saved ' + p); }
+  const skipNote = skipped ? ` - left out ${skipped > 1 ? skipped + ' adjustment layers' : 'the adjustment layer'} (Pixlr files can’t hold them; merge ${skipped > 1 ? 'them' : 'it'} down first to keep the look)` : '';
+  if (native) { const p = await native.saveFile({ defaultPath: pxzName, filters: [{ name: 'Pixlr document', extensions: ['pxz'] }], data: b64, encoding: 'base64' }); if (p) toast('Saved ' + p + skipNote); }
   else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = pxzName; a.click(); }
 }
 
@@ -2402,12 +2488,14 @@ function rebuildLayers() {
       const chev = el('button', 'g-chev' + (g.collapsed ? ' closed' : ''), '<svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="currentColor"/></svg>');
       chev.onclick = (e) => { e.stopPropagation(); g.collapsed = !g.collapsed; rebuildLayers(); };
       const icon = el('span', 'g-icon', folderSvg);
-      const info = el('div', 'info'); const name = el('div', 'name'); name.textContent = g.name; const sub = el('div', 'sub'); sub.textContent = `Group · ${groupMembers(g.id).length} layers` + ((g.opacity ?? 1) < 1 ? ` · ${Math.round(g.opacity * 100)}%` : '');
+      const info = el('div', 'info'); const name = el('div', 'name'); name.textContent = g.name; const sub = el('div', 'sub'); sub.textContent = `Group · ${groupMembers(g.id).length} layers` + ((g.opacity ?? 1) < 1 ? ` · ${Math.round(g.opacity * 100)}%` : '') + (g.blend && g.blend !== 'source-over' ? ' · ' + blendName(g.blend) : '');
       name.ondblclick = (e) => { e.stopPropagation(); renameInline(name, g.name, (v) => structOp(() => { g.name = v; }, 'Rename group')); };
       info.append(name, sub);
       const eye = el('button', 'eye', g.visible === false ? eyeOff : eyeOn); eye.title = 'Show / hide group';
       eye.onclick = (e) => { e.stopPropagation(); structOp(() => { g.visible = g.visible === false; }, 'Group visibility'); };
-      gr.append(chev, icon, info, eye); gr.onclick = () => selectGroup(g);
+      const gMarks = [];
+      if (groupLocked(g)) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Every layer in this group is locked - click to unlock them'; lk.onclick = (e) => { e.stopPropagation(); setGroupLock(g, false); }; gMarks.push(lk); }
+      gr.append(chev, icon, info, ...gMarks, eye); gr.onclick = () => selectGroup(g);
       rowDnD(gr, { group: g }); list.append(gr);
     }
     lastG = l.group || null;
@@ -2425,12 +2513,13 @@ function rebuildLayers() {
     }
     const info = el('div', 'info'); const name = el('div', 'name'); name.textContent = l.name; name.title = 'Double-click to rename';
     const sub = el('div', 'sub');
-    sub.textContent = (l.vec?.type === 'fill' ? 'Colour fill' + (l.vec.link && swatchById(l.vec.link) ? ' · ' + swatchById(l.vec.link).name : '') : l.kind) + (l.opacity < 1 ? ' · ' + Math.round(l.opacity * 100) + '%' : '') + (l.blend !== 'source-over' ? ' · ' + ($('#lyBlend').querySelector(`[value="${l.blend}"]`)?.textContent || l.blend) : '') + (l.mirror ? ' · Mirror on' : '');
+    sub.textContent = (l.vec?.type === 'fill' ? 'Colour fill' + (l.vec.link && swatchById(l.vec.link) ? ' · ' + swatchById(l.vec.link).name : '') : isAdj(l) ? ADJ_LAYERS[l.vec.adj]?.short || 'Adjustment' : l.kind) + (l.opacity < 1 ? ' · ' + Math.round(l.opacity * 100) + '%' : '') + (l.blend !== 'source-over' && !isAdj(l) ? ' · ' + blendName(l.blend) : '') + (l.mirror ? ' · Mirror on' : '');
     name.ondblclick = (ev) => { ev.stopPropagation(); renameInline(name, l.name, (v) => propChange(l, 'name', v, 'Rename layer')); };
     info.append(name, sub);
     const eye = el('button', 'eye', l.visible ? eyeOn : eyeOff); eye.title = 'Show / hide';
     eye.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'visible', !l.visible, 'Visibility'); };
     if (l.vec?.type === 'fill') { th.title = 'Double-click to change the colour'; th.ondblclick = (ev) => { ev.stopPropagation(); editFillLayerColour(l); }; }
+    if (isAdj(l)) { th.title = 'Adjustment layer - double-click to change its settings'; th.ondblclick = (ev) => { ev.stopPropagation(); editAdjLayer(l); }; row.ondblclick = (ev) => { if (!ev.target.closest('.name, .mask-th, .eye')) editAdjLayer(l); }; }
     const ths = mth ? [th, mth] : [th], marks = [];
     if (l.mirror) { const mb = el('button', 'eye mirror', mirrorSvg); mb.title = MIRROR_TIP() + ' - click to turn it off'; mb.onclick = (ev) => { ev.stopPropagation(); toggleMirror(l); }; marks.push(mb); }
     if (l.locked) { const lk = el('button', 'eye lock', lockSvg); lk.title = 'Locked - click to unlock'; lk.onclick = (ev) => { ev.stopPropagation(); propChange(l, 'locked', false, 'Unlock layer'); }; marks.push(lk); }
@@ -2441,10 +2530,13 @@ function rebuildLayers() {
   const ag = d.activeGroup && d.groups.find(x => x.id === d.activeGroup), a = activeLayer();
   const op_ = ag ? (ag.opacity ?? 1) : a.opacity;
   $('#lyOpacity').value = Math.round(op_ * 100); $('#lyOpacityVal').textContent = Math.round(op_ * 100) + '%';
-  $('#lyBlend').value = a.blend; $('#lyBlend').disabled = !!ag;
+  $('#lyBlend').value = ag ? ag.blend || 'source-over' : a.blend; $('#lyBlend').disabled = !ag && isAdj(a);
+  $('#lyBlend').title = !ag && isAdj(a) ? 'Adjustment layers have no blend mode - use opacity and the mask' : ag ? 'Blend mode of the whole group' : 'Blend mode';
   $('#lyDel').disabled = false;
   $('#lyMerge').disabled = !ag && d.layers.indexOf(a) === 0;
-  $('#lyMerge').title = ag ? 'Merge group into one layer' : 'Merge down (Ctrl+M)';
+  $('#lyMerge').title = ag ? 'Merge group into one layer' : isAdj(a) ? 'Merge down - bakes this adjustment into the layer below (Ctrl+M)' : 'Merge down (Ctrl+M)';
+  $('#lyGroup').title = ag ? 'Ungroup (Ctrl+Shift+G by default)' : 'Group the selected layers (Ctrl+G by default)';
+  $('#lyGroup').classList.toggle('on', !!ag);
   $('#btnUndo').disabled = !d.undo.length; $('#btnRedo').disabled = !d.redo.length;
   updateThumbs(); renderHistory(); renderSwatches();
 }
@@ -2454,7 +2546,9 @@ $('#layerList').addEventListener('drop', (e) => { if (!dragInfo || e.target !== 
 function updateThumbs() {
   for (const l of doc().layers) {
     const th = thumbs.get(l.id); if (!th) continue;
-    const c = th.getContext('2d'); c.clearRect(0, 0, th.width, th.height); c.drawImage(l.canvas, 0, 0, th.width, th.height);
+    const c = th.getContext('2d');
+    if (isAdj(l)) { if (!th._adj) { drawAdjIcon(c, th.width, th.height); th._adj = true; } } // drawn once: it never changes
+    else { c.clearRect(0, 0, th.width, th.height); c.drawImage(l.canvas, 0, 0, th.width, th.height); }
     const mt = l.mask && thumbs.get(l.id + ':mask');
     if (mt) { const x = mt.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, mt.width, mt.height); x.drawImage(l.mask, 0, 0, mt.width, mt.height); }
   }
@@ -2468,7 +2562,15 @@ $('#lyOpacity').onchange = () => {
   else { const a = activeLayer(), v = a.opacity; if (opacityStart !== null && opacityStart !== v) { a.opacity = opacityStart; propChange(a, 'opacity', v, 'Layer opacity'); } else rebuildLayers(); }
   opacityStart = null; scheduleAutosave();
 };
-$('#lyBlend').onchange = () => propChange(activeLayer(), 'blend', $('#lyBlend').value, 'Blend mode');
+$('#lyBlend').onchange = () => {
+  const d = doc(), ag = d.activeGroup && d.groups.find(x => x.id === d.activeGroup), v = $('#lyBlend').value;
+  if (ag) { if ((ag.blend || 'source-over') !== v) structOp(() => { ag.blend = v; }, 'Group blend mode'); }
+  else propChange(activeLayer(), 'blend', v, 'Blend mode');
+};
+const blendName = (v) => $('#lyBlend').querySelector(`[value="${v}"]`)?.textContent || v;
+// a group counts as locked when every layer in it is; locking a group locks all of its layers
+const groupLocked = (g, d = doc()) => { const m = groupMembers(g.id, d); return m.length > 0 && m.every(l => l.locked); };
+function setGroupLock(g, on) { structOp(() => { for (const l of groupMembers(g.id)) l.locked = on; }, on ? 'Lock group' : 'Unlock group'); toast(`${on ? 'Locked' : 'Unlocked'} every layer in “${g.name}”`); }
 
 // ---- mask commands
 function editMask(l, fresh) {
@@ -2561,9 +2663,12 @@ $('#lyMerge').onclick = () => structOp(() => {
   const d = doc();
   if (d.activeGroup) { const g = d.groups.find(x => x.id === d.activeGroup), mem = groupMembers(g.id), m = makeLayer(g.name); flattenInto(m, mem); d.layers.splice(d.layers.indexOf(mem[mem.length - 1]) + 1, 0, m); d.layers = d.layers.filter(l => !mem.includes(l)); d.activeId = m.id; d.activeGroup = null; d.sel = new Set([m.id]); normalizeGroups(d); return; }
   const a = activeLayer(), i = d.layers.indexOf(a); if (i === 0) return false;
-  const below = d.layers[i - 1], c = below.ctx; delete below.vec; below.kind = 'Layer';
+  const below = d.layers[i - 1], c = below.ctx;
+  if (isAdj(below)) { toast('Can’t merge into an adjustment layer - it has no pixels. Merge the adjustment down onto a picture layer instead.'); return false; }
+  delete below.vec; below.kind = 'Layer';
   if (below.mask) { if (!below.maskOff) { c.globalCompositeOperation = 'destination-in'; c.drawImage(maskAlpha(below), 0, 0); c.globalCompositeOperation = 'source-over'; } delete below.mask; delete below.maskOff; delete below._ma; }
-  if (a.visible) { c.globalAlpha = a.opacity; c.globalCompositeOperation = a.blend; c.drawImage(layerSource(a), 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; }
+  if (a.visible && isAdj(a)) applyAdj(c, a); // an adjustment merged down is baked into the layer below
+  else if (a.visible) { c.globalAlpha = a.opacity; c.globalCompositeOperation = a.blend; c.drawImage(layerSource(a), 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'; }
   d.layers.splice(i, 1); d.activeId = below.id; d.sel = new Set([below.id]);
 }, doc().activeGroup ? 'Merge group' : 'Merge down');
 $('#lyClear').onclick = () => hasSel ? clearSelectedPixels() : labelled('Clear', () => { const o = beginOp(); if (!o) return; withClip(o.l.ctx, c => c.clearRect(0, 0, W, H)); commitOp(o); });
@@ -2942,7 +3047,7 @@ async function loadSession() {
 // Every shortcut is a command with a default key; Help → Keyboard shortcuts (or ?) lists them and lets you change them.
 // Changed keys are kept in localStorage "stitch-keys" ({ command id: key, or '' for none }).
 const stepSize = (dir) => { const v = curSize(); setSize(dir < 0 ? v - (v > 50 ? 10 : v > 10 ? 2 : 1) : v + (v >= 50 ? 10 : v >= 10 ? 2 : 1)); };
-const toggleLock = () => { const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); };
+const toggleLock = () => { const d = doc(), g = d.activeGroup && d.groups.find(x => x.id === d.activeGroup); if (g) { setGroupLock(g, !groupLocked(g)); return; } const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); };
 const TOOL_NAMES = { move: 'Move', select: 'Select', lasso: 'Lasso', wand: 'Magic select', brush: 'Brush', eraser: 'Eraser', pencil: 'Pencil', fill: 'Fill bucket', gradient: 'Gradient', eyedropper: 'Eyedropper', shape: 'Shape', pen: 'Pen', text: 'Text', hand: 'Hand' };
 const COMMANDS = [
   ...Object.entries({ move: 'V', select: 'M', lasso: 'L', wand: 'W', brush: 'B', eraser: 'E', pencil: 'P', fill: 'G', gradient: 'D', eyedropper: 'I', shape: 'U', pen: 'K', text: 'T', hand: 'H' })
@@ -3332,60 +3437,137 @@ function openHueSat() {
     }
   });
 }
+// the curves graph: edits curves ({ rgb, r, g, b } point lists) in place and calls onChange after every change
+function curvesEditor(curves, onChange) {
+  let ch = 'rgb';
+  const body = document.createElement('div'); body.className = 'adj-body curves';
+  const sel = document.createElement('div'); sel.className = 'seg';
+  for (const [k, t] of [['rgb', 'RGB'], ['r', 'Red'], ['g', 'Green'], ['b', 'Blue']]) { const b = document.createElement('button'); b.textContent = t; b.className = k === ch ? 'on' : ''; b.onclick = () => { ch = k; sel.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); draw(); }; sel.append(b); }
+  const cv = document.createElement('canvas'); cv.width = cv.height = 512; cv.className = 'curve-canvas';
+  const g = cv.getContext('2d');
+  const hint = document.createElement('p'); hint.className = 'adj-note'; hint.textContent = 'Click to add a point · drag to move · drag a point off the graph or double-click it to remove';
+  const reset = document.createElement('button'); reset.className = 'mini'; reset.textContent = 'Reset channel'; reset.onclick = () => { curves[ch] = [[0, 0], [255, 255]]; draw(); onChange(); };
+  const top = document.createElement('div'); top.className = 'curve-top'; top.append(sel, reset);
+  body.append(top, cv, hint);
+  const col = { rgb: '#e6e8ee', r: '#ff5c5c', g: '#4fd67a', b: '#5b8cff' };
+  function draw() {
+    g.clearRect(0, 0, 512, 512); g.fillStyle = '#16181d'; g.fillRect(0, 0, 512, 512);
+    g.strokeStyle = '#2c303a'; g.lineWidth = 1; for (let i = 1; i < 4; i++) { g.beginPath(); g.moveTo(i * 128, 0); g.lineTo(i * 128, 512); g.moveTo(0, i * 128); g.lineTo(512, i * 128); g.stroke(); }
+    g.strokeStyle = '#3a3f4b'; g.beginPath(); g.moveTo(0, 512); g.lineTo(512, 0); g.stroke();
+    for (const k of ['r', 'g', 'b', 'rgb']) { if (k !== ch && (k === 'rgb' || curves[k].length === 2 && curves[k][0][1] === 0 && curves[k][1][1] === 255)) continue;
+      const L = curveLUT(curves[k]); g.strokeStyle = col[k]; g.globalAlpha = k === ch ? 1 : .35; g.lineWidth = 2.5; g.beginPath();
+      for (let x = 0; x < 256; x++) { const px = x * 2 + 1, py = 511 - L[x] * 2; x ? g.lineTo(px, py) : g.moveTo(px, py); } g.stroke(); }
+    g.globalAlpha = 1;
+    for (const [x, y] of curves[ch]) { g.fillStyle = '#fff'; g.strokeStyle = '#000'; g.lineWidth = 2; g.beginPath(); g.arc(x * 2 + 1, 511 - y * 2, 7, 0, Math.PI * 2); g.fill(); g.stroke(); }
+  }
+  const toPt = (e) => { const r = cv.getBoundingClientRect(); return [Math.round(clamp8((e.clientX - r.left) / r.width * 255)), Math.round(clamp8(255 - (e.clientY - r.top) / r.height * 255))]; };
+  const hit = (p) => curves[ch].findIndex(([x, y]) => Math.hypot(x - p[0], y - p[1]) < 10);
+  let drag = -1;
+  cv.addEventListener('pointerdown', (e) => {
+    const p = toPt(e); let i = hit(p);
+    if (i < 0) { curves[ch].push(p); curves[ch].sort((a, b) => a[0] - b[0]); i = curves[ch].indexOf(p); }
+    drag = i; cv.setPointerCapture(e.pointerId); draw(); onChange();
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (drag < 0) return;
+    const r = cv.getBoundingClientRect(), pts = curves[ch], p = toPt(e);
+    const out = e.clientY < r.top - 30 || e.clientY > r.bottom + 30 || e.clientX < r.left - 30 || e.clientX > r.right + 30;
+    if (out && pts.length > 2) { pts.splice(drag, 1); drag = -1; draw(); onChange(); return; }
+    const lo = drag > 0 ? pts[drag - 1][0] + 1 : 0, hi = drag < pts.length - 1 ? pts[drag + 1][0] - 1 : 255;
+    pts[drag] = [Math.max(lo, Math.min(hi, p[0])), p[1]]; draw(); onChange();
+  });
+  cv.addEventListener('pointerup', () => { drag = -1; });
+  cv.addEventListener('dblclick', (e) => { const i = hit(toPt(e)); if (i >= 0 && curves[ch].length > 2) { curves[ch].splice(i, 1); draw(); onChange(); } });
+  draw(); return body;
+}
 function openCurves() {
   const curves = { rgb: [[0, 0], [255, 255]], r: [[0, 0], [255, 255]], g: [[0, 0], [255, 255]], b: [[0, 0], [255, 255]] };
-  let ch = 'rgb';
-  runAdjust('Curves', (preview) => {
-    const body = document.createElement('div'); body.className = 'adj-body curves';
-    const sel = document.createElement('div'); sel.className = 'seg';
-    for (const [k, t] of [['rgb', 'RGB'], ['r', 'Red'], ['g', 'Green'], ['b', 'Blue']]) { const b = document.createElement('button'); b.textContent = t; b.className = k === ch ? 'on' : ''; b.onclick = () => { ch = k; sel.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); draw(); }; sel.append(b); }
-    const cv = document.createElement('canvas'); cv.width = cv.height = 512; cv.className = 'curve-canvas';
-    const g = cv.getContext('2d');
-    const hint = document.createElement('p'); hint.className = 'adj-note'; hint.textContent = 'Click to add a point · drag to move · drag a point off the graph or double-click it to remove';
-    const reset = document.createElement('button'); reset.className = 'mini'; reset.textContent = 'Reset channel'; reset.onclick = () => { curves[ch] = [[0, 0], [255, 255]]; draw(); preview(); };
-    const top = document.createElement('div'); top.className = 'curve-top'; top.append(sel, reset);
-    body.append(top, cv, hint);
-    const col = { rgb: '#e6e8ee', r: '#ff5c5c', g: '#4fd67a', b: '#5b8cff' };
-    function draw() {
-      g.clearRect(0, 0, 512, 512); g.fillStyle = '#16181d'; g.fillRect(0, 0, 512, 512);
-      g.strokeStyle = '#2c303a'; g.lineWidth = 1; for (let i = 1; i < 4; i++) { g.beginPath(); g.moveTo(i * 128, 0); g.lineTo(i * 128, 512); g.moveTo(0, i * 128); g.lineTo(512, i * 128); g.stroke(); }
-      g.strokeStyle = '#3a3f4b'; g.beginPath(); g.moveTo(0, 512); g.lineTo(512, 0); g.stroke();
-      for (const k of ['r', 'g', 'b', 'rgb']) { if (k !== ch && (k === 'rgb' || curves[k].length === 2 && curves[k][0][1] === 0 && curves[k][1][1] === 255)) continue;
-        const L = curveLUT(curves[k]); g.strokeStyle = col[k]; g.globalAlpha = k === ch ? 1 : .35; g.lineWidth = 2.5; g.beginPath();
-        for (let x = 0; x < 256; x++) { const px = x * 2 + 1, py = 511 - L[x] * 2; x ? g.lineTo(px, py) : g.moveTo(px, py); } g.stroke(); }
-      g.globalAlpha = 1;
-      for (const [x, y] of curves[ch]) { g.fillStyle = '#fff'; g.strokeStyle = '#000'; g.lineWidth = 2; g.beginPath(); g.arc(x * 2 + 1, 511 - y * 2, 7, 0, Math.PI * 2); g.fill(); g.stroke(); }
-    }
-    const toPt = (e) => { const r = cv.getBoundingClientRect(); return [Math.round(clamp8((e.clientX - r.left) / r.width * 255)), Math.round(clamp8(255 - (e.clientY - r.top) / r.height * 255))]; };
-    const hit = (p) => curves[ch].findIndex(([x, y]) => Math.hypot(x - p[0], y - p[1]) < 10);
-    let drag = -1;
-    cv.addEventListener('pointerdown', (e) => {
-      const p = toPt(e); let i = hit(p);
-      if (i < 0) { curves[ch].push(p); curves[ch].sort((a, b) => a[0] - b[0]); i = curves[ch].indexOf(p); }
-      drag = i; cv.setPointerCapture(e.pointerId); draw(); preview();
-    });
-    cv.addEventListener('pointermove', (e) => {
-      if (drag < 0) return;
-      const r = cv.getBoundingClientRect(), pts = curves[ch], p = toPt(e);
-      const out = e.clientY < r.top - 30 || e.clientY > r.bottom + 30 || e.clientX < r.left - 30 || e.clientX > r.right + 30;
-      if (out && pts.length > 2) { pts.splice(drag, 1); drag = -1; draw(); preview(); return; }
-      const lo = drag > 0 ? pts[drag - 1][0] + 1 : 0, hi = drag < pts.length - 1 ? pts[drag + 1][0] - 1 : 255;
-      pts[drag] = [Math.max(lo, Math.min(hi, p[0])), p[1]]; draw(); preview();
-    });
-    cv.addEventListener('pointerup', () => { drag = -1; });
-    cv.addEventListener('dblclick', (e) => { const i = hit(toPt(e)); if (i >= 0 && curves[ch].length > 2) { curves[ch].splice(i, 1); draw(); preview(); } });
-    draw(); return body;
-  }, (d) => {
+  runAdjust('Curves', (preview) => curvesEditor(curves, preview), (d) => {
     const M = curveLUT(curves.rgb), R = curveLUT(curves.r), G = curveLUT(curves.g), B = curveLUT(curves.b);
     for (let i = 0; i < d.length; i += 4) { d[i] = M[R[d[i]]]; d[i + 1] = M[G[d[i + 1]]]; d[i + 2] = M[B[d[i + 2]]]; }
   });
+}
+
+// ---- adjustment layers (drawn by applyAdj): made from the Adjustment or Layer menu or the Layers panel,
+// changed later by double-clicking them
+function adjDefaults(kind) {
+  if (kind === 'curves') return { rgb: [[0, 0], [255, 255]], r: [[0, 0], [255, 255]], g: [[0, 0], [255, 255]], b: [[0, 0], [255, 255]] };
+  if (kind === 'hs') return { hue: 0, sat: 0, light: 0, colorize: false };
+  return Object.fromEntries(ADJ[kind].sliders.map(([k, , , , v]) => [k, v]));
+}
+const COLORIZE_TRACK = 'linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,45%),hsl(180,75%,50%),hsl(240,75%,55%),hsl(300,75%,50%),hsl(360,75%,50%))';
+// the settings for an adjustment layer: edits p in place and calls onChange after every change
+function adjLayerBody(kind, p, onChange) {
+  if (kind === 'curves') return curvesEditor(p, onChange);
+  const body = el('div', 'adj-body');
+  const row = (k, label, mn, mx, def, unit, trk) => { const r = slider(label, mn, mx, def, unit, trk); r.set(p[k] ?? def); r.addEventListener('change', () => { p[k] = r.value(); onChange(); }); body.append(r); return r; };
+  if (kind !== 'hs') { for (const [k, label, mn, mx, def, unit, trk] of ADJ[kind].sliders) row(k, label, mn, mx, def, unit || '', trk || ''); return body; }
+  const hue = row('hue', 'Hue', -180, 180, 0, '°', HUE_TRACK);
+  const sat = row('sat', 'Saturation', -100, 100, 0, '', 'linear-gradient(90deg,#8a8a8a,#3aa0c8 55%,#d9c03a 78%,#d2382f)');
+  const light = row('light', 'Lightness', -100, 100, 0, '', 'linear-gradient(90deg,#111,#666,#e8e8e8)');
+  const hueRange = (on) => { for (const i of hue.querySelectorAll('input')) { i.min = on ? 0 : -180; i.max = on ? 360 : 180; } hue.querySelector('.sl-range').style.setProperty('--trk', on ? COLORIZE_TRACK : HUE_TRACK); };
+  hueRange(!!p.colorize); hue.set(p.hue);
+  const cz = el('label', 'switch-row'); cz.innerHTML = '<span>Colorize</span><input type="checkbox" class="switch">';
+  const box = cz.querySelector('input'); box.checked = !!p.colorize;
+  box.onchange = () => {
+    p.colorize = box.checked; Object.assign(p, p.colorize ? { hue: 200, sat: 25, light: 0 } : { hue: 0, sat: 0, light: 0 });
+    hueRange(p.colorize); hue.set(p.hue); sat.set(p.sat); light.set(p.light); onChange();
+  };
+  body.append(cz); return body;
+}
+let adjLayerDlg = null;
+// opens the settings of adjustment layer l. undoMark: set when l was just made (Cancel then removes it again)
+function editAdjLayer(l, undoMark) {
+  if (!isAdj(l)) return;
+  adjLayerDlg?.cancel();
+  const d = doc(), A = ADJ_LAYERS[l.vec.adj] || { title: 'Adjustment', short: 'Adjustment' }, before = l.vec, work = clone(l.vec.p);
+  let raf = 0;
+  const preview = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { l.vec = { ...before, p: clone(work) }; requestRender(); }); };
+  const body = adjLayerBody(l.vec.adj, work, preview);
+  const note = el('p', 'adj-note'); note.textContent = (l.group ? 'Changes the layers below it in its group.' : 'Changes every layer below it.') + ' Paint black on the layer to keep parts unchanged, white to bring the change back.';
+  body.append(note);
+  const done = () => { cancelAnimationFrame(raf); l._adjOff = false; adjLayerDlg = null; };
+  adjLayerDlg = dlg(A.title, body, {
+    okLabel: undoMark != null ? 'Done' : 'Apply',
+    compare: { down: () => { l._adjOff = true; requestRender(); }, up: () => { l._adjOff = false; requestRender(); } },
+    onOk: () => {
+      done(); const after = { ...before, p: clone(work) }; l.vec = before;
+      if (JSON.stringify(after) !== JSON.stringify(before)) propChange(l, 'vec', after, `${A.short} settings`);
+      requestRender();
+    },
+    onCancel: () => {
+      done(); l.vec = before; requestRender();
+      if (undoMark != null && d === doc() && d.undo.length === undoMark) { undo(); d.redo.pop(); changed(); rebuildLayers(); } // just made: take it away again, leaving no redo
+    },
+  });
+}
+function newAdjLayer(kind) {
+  const A = ADJ_LAYERS[kind]; if (!A) return;
+  if (penDraw) finishPath(); endTextEdit(); flushVecEdit(); cancelOp();
+  const fromSel = hasSel; let made = null;
+  structOp(() => {
+    made = addLayer(A.name); made.kind = 'Adjustment'; made.vec = { type: 'adj', adj: kind, p: adjDefaults(kind) };
+    made.mask = newMask(W, H, fromSel ? '#000' : '#fff'); // with a selection, only the selected part changes
+    if (fromSel) { const t = mkCanvas(), tx = t.getContext('2d'); tx.fillStyle = '#fff'; tx.fillRect(0, 0, W, H); tx.globalCompositeOperation = 'destination-in'; tx.drawImage(selC, 0, 0); made.mask.getContext('2d').drawImage(t, 0, 0); }
+  }, `New ${A.short.toLowerCase()} layer`);
+  if (!made) return;
+  if (fromSel) deselect(false);
+  editAdjLayer(made, doc().undo.length);
+}
+// the picture on an adjustment layer's thumbnail: a half dark, half light circle
+function drawAdjIcon(c, w, h) {
+  c.clearRect(0, 0, w, h); c.fillStyle = '#2a2d35'; c.fillRect(0, 0, w, h);
+  const r = Math.min(w, h) * .3, cx = w / 2, cy = h / 2;
+  c.fillStyle = '#e8e8e8'; c.beginPath(); c.arc(cx, cy, r, Math.PI / 2, Math.PI * 1.5); c.fill();
+  c.fillStyle = '#111'; c.beginPath(); c.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2); c.fill();
+  c.strokeStyle = '#e8e8e8'; c.lineWidth = 2; c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.stroke();
 }
 
 // ---- canvas (whole document) transforms
 function transformAll(label, fn) {
   structOp(() => {
     for (const l of doc().layers) {
-      delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer';
+      if (!isAdj(l)) { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; } // adjustments keep working; their mask turns with the rest
       for (const t of l.mask ? [l.canvas, l.mask] : [l.canvas]) { const snap = mkCanvas(); snap.getContext('2d').drawImage(t, 0, 0); const c = t.getContext('2d'); c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H); fn(c, snap); c.restore(); }
       l._maDirty = true;
     }
@@ -3395,7 +3577,7 @@ const rotateCanvas = (dir) => transformAll(dir > 0 ? 'Rotate right' : 'Rotate le
 const flipCanvas = (h) => transformAll(h ? 'Flip horizontal' : 'Flip vertical', (c, s) => { if (h) { c.translate(W, 0); c.scale(-1, 1); } else { c.translate(0, H); c.scale(1, -1); } c.drawImage(s, 0, 0); });
 function flipLayer(h) {
   const vl = activeLayer();
-  if (vl.vec && vl.vec.type !== 'fill') { // editable layers flip as themselves (mirrored across the canvas, like pixels)
+  if (vl.vec && vl.vec.type !== 'fill' && !isAdj(vl)) { // editable layers flip as themselves (mirrored across the canvas, like pixels)
     arrApply(h ? 'Flip layer horizontal' : 'Flip layer vertical', s => { if (h) { s.flipX = !s.flipX; s.x = W - s.x - s.w; } else { s.flipY = !s.flipY; s.y = H - s.y - s.h; } s.angle = -s.angle; });
     return;
   }
@@ -3429,7 +3611,7 @@ function resizeProject(kind, nw, nh, anchor) {
     if (v?.type === 'fill') { // colour fills keep working: move their mask along with the pixels
       const m = redraw(maskCanvas(v.mask)), url = m.toDataURL(); maskCache.set(url, m); v.mask = url;
       if (v.bb) v.bb = kind === 'image' ? [v.bb[0] * sx, v.bb[1] * sy, v.bb[2] * sx, v.bb[3] * sy] : [v.bb[0] + dx, v.bb[1] + dy, v.bb[2], v.bb[3]];
-    } else if (v && kind === 'image') { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; } // scaled text/shapes become pixels, like rotate/flip
+    } else if (v && v.type !== 'adj' && kind === 'image') { delete l.vec; if (l.kind !== 'Image') l.kind = 'Layer'; } // scaled text/shapes become pixels, like rotate/flip
     else if (v) shiftVec(v, dx, dy);
     l.canvas = redraw(l.canvas); l.ctx = ctxOf(l.canvas);
     if (l.mask) { l.mask = redraw(l.mask); l._maDirty = true; }
@@ -3577,15 +3759,22 @@ const MENUS = [
       { label: 'Edit mask', run: () => editMask(activeLayer()), off: () => !activeLayer().mask || maskEditing(activeLayer()) },
       { label: 'Invert mask', run: invertMask, off: () => !activeLayer().mask },
       { label: 'Turn mask off / on', run: () => { const l = activeLayer(); propChange(l, 'maskOff', !l.maskOff, l.maskOff ? 'Enable mask' : 'Disable mask'); }, off: () => !activeLayer().mask },
-      { label: 'Apply mask', run: applyMask, off: () => !activeLayer().mask },
+      { label: 'Apply mask', run: applyMask, off: () => !activeLayer().mask || isAdj(activeLayer()) },
       { label: 'Delete mask', run: deleteMask, off: () => !activeLayer().mask },
     ] },
+    { label: 'Adjustment layer', sub: [
+      { label: 'Brightness & contrast…', run: () => newAdjLayer('bc'), layerAdj: true },
+      { label: 'Hue & saturation…', run: () => newAdjLayer('hs'), layerAdj: true },
+      { label: 'Curves…', run: () => newAdjLayer('curves'), layerAdj: true },
+      { label: 'Temperature & tint…', run: () => newAdjLayer('temp'), layerAdj: true },
+    ] },
+    { label: 'Edit adjustment…', run: () => editAdjLayer(activeLayer()), off: () => !isAdj(activeLayer()) || !!doc().activeGroup, layerAdj: true },
     '-',
     { label: 'Group layers', key: 'Ctrl+G', run: groupLayers },
     { label: 'Ungroup', key: 'Ctrl+Shift+G', run: ungroupLayers, off: () => !doc().activeGroup && !activeLayer().group },
-    { label: 'Lock / unlock layer', key: 'Ctrl+/', run: () => { const l = activeLayer(); propChange(l, 'locked', !l.locked, l.locked ? 'Unlock layer' : 'Lock layer'); } },
+    { label: 'Lock / unlock layer', key: 'Ctrl+/', run: () => toggleLock() },
     { label: 'Mirror on / off', run: () => toggleMirror(), off: () => !!doc().activeGroup },
-    { label: 'Rasterize layer', run: () => { const l = activeLayer(); endTextEdit(); flushVecEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); }, off: () => !activeLayer().vec },
+    { label: 'Rasterize layer', run: () => { const l = activeLayer(); endTextEdit(); flushVecEdit(); structOp(() => { delete l.vec; l.kind = 'Layer'; }, 'Rasterize layer'); buildOptions(); }, off: () => !activeLayer().vec || isAdj(activeLayer()) },
     '-',
     { label: 'Merge', sub: [
       { label: 'Merge down', key: 'Ctrl+M', run: () => $('#lyMerge').click(), off: () => doc().layers.indexOf(activeLayer()) === 0 },
@@ -3622,6 +3811,14 @@ const MENUS = [
     { label: 'Delete selected pixels', key: 'Del', run: clearSelectedPixels, off: () => !hasSel },
   ] },
   { label: 'Adjustment', items: [
+    { label: 'New adjustment layer', sub: [
+      { label: 'Brightness & contrast…', run: () => newAdjLayer('bc'), layerAdj: true },
+      { label: 'Hue & saturation…', run: () => newAdjLayer('hs'), layerAdj: true },
+      { label: 'Curves…', run: () => newAdjLayer('curves'), layerAdj: true },
+      { label: 'Temperature & tint…', run: () => newAdjLayer('temp'), layerAdj: true },
+    ] },
+    { label: 'Edit adjustment layer…', run: () => editAdjLayer(activeLayer()), off: () => !isAdj(activeLayer()) || !!doc().activeGroup, layerAdj: true },
+    '-',
     { label: 'Brightness & contrast…', run: () => openAdjust('bc') },
     { label: 'Hue & saturation…', run: openHueSat },
     { label: 'Vibrance…', run: () => openAdjust('vib') },
@@ -3646,7 +3843,7 @@ for (const m of MENUS) for (const it of menuEntries(m.items)) if (MENU_CMDS[it.l
 // menu actions that only work on pixels are greyed out while text, a shape or a colour fill is selected
 const pixelsOnly = () => !doc().noSel && !!activeLayer()?.vec;
 const RASTER_ONLY = ['Cut', 'Delete selected pixels'];
-for (const m of MENUS) for (const it of menuEntries(m.items)) if (it.run && (m.label === 'Adjustment' || it.raster || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
+for (const m of MENUS) for (const it of menuEntries(m.items)) if (it.run && !it.layerAdj && (m.label === 'Adjustment' || it.raster || RASTER_ONLY.includes(it.label))) { const prev = it.off; it.rasterOnly = true; it.off = () => pixelsOnly() || !!prev?.(); }
 const menubar = $('#menubar');
 let openMenu = null;
 function closeMenus() { menubar.querySelectorAll('.mb-item').forEach(m => m.classList.remove('open')); closeSubs(0); openMenu = null; }
@@ -3673,7 +3870,7 @@ function fillMenu(box, items, level) {
     } else {
       b.lastChild.textContent = it.cmd ? keyOf(it.cmd) : it.key || '';
       b.disabled = !!it.off?.() || !it.run;
-      if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = 'Needs a plain image layer - use Layer → Rasterize layer first';
+      if (b.disabled && it.rasterOnly && pixelsOnly()) b.title = isAdj(activeLayer()) ? 'Adjustment layers have no pixels - make a new adjustment layer instead, or pick a picture layer' : 'Needs a plain image layer - use Layer → Rasterize layer first';
       b.onmouseenter = () => closeSubs(level);
       b.onclick = () => { closeMenus(); it.run?.(); };
     }
@@ -3901,11 +4098,20 @@ $('#lyMenuBtn').onclick = (e) => {
   for (const id of ['lyAdjust', 'lyClear']) { $('#' + id).disabled = px; $('#' + id).title = px ? 'Needs a plain image layer - use Layer → Rasterize layer first' : ''; }
   for (const id of ['lyMirrorRL', 'lyMirrorLR']) $('#' + id).disabled = px || !isTemplate();
   for (const id of ['lySymRL', 'lySymLR']) $('#' + id).disabled = px;
+  $('#lyAdjMenu').hidden = true;
+  $('#lyUngroupMenu').disabled = !doc().activeGroup && !activeLayer().group;
+  if (px && isAdj(activeLayer())) for (const id of ['lyAdjust', 'lyClear']) $('#' + id).title = 'Adjustment layers have no pixels - double-click the layer to change its settings';
 };
 $('#lyMenu').addEventListener('click', () => { $('#lyMenu').hidden = true; });
+$('#lyGroupMenu').onclick = groupLayers;
+$('#lyUngroupMenu').onclick = ungroupLayers;
+$('#lyGroup').onclick = () => { if (doc().activeGroup) ungroupLayers(); else groupLayers(); };
+$('#lyAdjBtn').onclick = (e) => { e.stopPropagation(); $('#lyMenu').hidden = true; $('#lyAdjMenu').hidden = !$('#lyAdjMenu').hidden; };
+$('#lyAdjMenu').addEventListener('click', (e) => { const b = e.target.closest('[data-adj]'); $('#lyAdjMenu').hidden = true; if (b) newAdjLayer(b.dataset.adj); });
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#panelsMenu')) $('#panelsMenu').hidden = true;
   if (!e.target.closest('#lyMenu, #lyMenuBtn')) $('#lyMenu').hidden = true;
+  if (!e.target.closest('#lyAdjMenu, #lyAdjBtn')) $('#lyAdjMenu').hidden = true;
 });
 window.addEventListener('resize', () => panels().forEach(p => { if (p.classList.contains('floating')) placeFloat(p, parseFloat(p.style.left), parseFloat(p.style.top)); }));
 { // Colours sits in the dock just above the zoom bar, collapsed until you open it
@@ -3927,9 +4133,9 @@ function openLayerPop(item, x, y) {
   name.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') name.blur(); };
   name.onchange = () => { const v = name.value.trim(); if (!v) return; if (isG) structOp(() => { obj.name = v; }, 'Rename group'); else propChange(obj, 'name', v, 'Rename layer'); };
   box.append(x_, lab('Name'), name);
-  if (!isG) {
-    const bl = el('select', 'lp-input'); bl.innerHTML = $('#lyBlend').innerHTML; bl.value = obj.blend; bl.options[0].textContent = 'None';
-    bl.onchange = () => propChange(obj, 'blend', bl.value, 'Blend mode');
+  if (isG || !isAdj(obj)) {
+    const bl = el('select', 'lp-input'); bl.innerHTML = $('#lyBlend').innerHTML; bl.value = isG ? obj.blend || 'source-over' : obj.blend; bl.options[0].textContent = 'None';
+    bl.onchange = () => { if (isG) structOp(() => { obj.blend = bl.value; }, 'Group blend mode'); else propChange(obj, 'blend', bl.value, 'Blend mode'); };
     box.append(lab('Blend Mode'), bl);
   }
   const opac = slider('Opacity', 0, 100, Math.round((obj.opacity ?? 1) * 100)); opac.classList.add('lp-sl');
@@ -3941,11 +4147,13 @@ function openLayerPop(item, x, y) {
   box.append(opac);
   const seg2 = (a, b, get, set) => { const g = el('div', 'lp-seg'); for (const [v, t] of [[false, a], [true, b]]) { const btn = el('button', get() === v ? 'on' : ''); btn.textContent = t; btn.onclick = () => { set(v); g.querySelectorAll('button').forEach((x, i) => x.classList.toggle('on', (i === 1) === get())); }; g.append(btn); } return g; };
   if (!isG) box.append(seg2('Unlocked', 'Locked', () => !!obj.locked, (v) => propChange(obj, 'locked', v, v ? 'Lock layer' : 'Unlock layer')));
+  else box.append(seg2('Unlocked', 'Locked', () => groupLocked(obj), (v) => { if (groupLocked(obj) !== v) setGroupLock(obj, v); }));
   if (!isG) { const ms = seg2('Mirror off', 'Mirror on', () => !!obj.mirror, (v) => { if (!!obj.mirror !== v) toggleMirror(obj); }); ms.title = MIRROR_TIP().replace('Mirror is on: ', 'While on, ') + '. Turning it off keeps what was mirrored.'; box.append(ms); }
   box.append(seg2('Visible', 'Hidden', () => isG ? obj.visible === false : !obj.visible, (v) => { if (isG) structOp(() => { obj.visible = !v; }, 'Group visibility'); else propChange(obj, 'visible', !v, 'Visibility'); }));
   const foot = el('div', 'lp-foot');
   const fb = (svg, title, fn, off) => { const b = el('button', 'lp-btn', svg); b.title = title; b.disabled = !!off; b.onclick = () => { closeLayerPop(); fn(); }; return b; };
   const ic = (d_) => `<svg viewBox="0 0 24 24"><path d="${d_}"/></svg>`;
+  if (!isG && isAdj(obj)) foot.append(fb('<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 5a7 7 0 0 1 0 14z" fill="currentColor"/></svg>', 'Change the adjustment settings', () => editAdjLayer(obj)));
   foot.append(
     fb(ic('M12 4v9M8 9l4 4 4-4M5 18h14'), isG ? 'Merge group' : 'Merge down', () => { if (isG) selectGroup(obj); else selectLayer(obj); $('#lyMerge').click(); }, !isG && d.layers.indexOf(obj) === 0),
     fb(ic('M8 4v8M5 9l3 3 3-3M16 4v8M13 9l3 3 3-3M5 18h14'), 'Merge visible', mergeVisible),

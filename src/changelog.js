@@ -1,5 +1,12 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.15.0', notes: [
+    'New: adjustment layers. Brightness & contrast, Hue & saturation, Curves and Temperature & tint can now be layers that change the colours of everything below them without touching the pixels. Double-click one to change it again at any time, paint black on it to keep parts unchanged, or lower its opacity to soften it. Find them under Adjustment → New adjustment layer, Layer → Adjustment layer, or the half-circle button at the bottom of the Layers panel. With a selection, only the selected part changes.',
+    'An adjustment layer inside a group only changes the layers in that group. Merge down on an adjustment layer bakes it into the layer below.',
+    'Groups can now have a blend mode, like Multiply or Overlay, for the whole group. Pick the group, then choose it next to Opacity.',
+    'Lock a whole group: select the group and press Ctrl+/, or use Locked in its right-click panel.',
+    'New Group button at the bottom of the Layers panel: groups the selected layers, or ungroups a selected group. Group and Ungroup are also in the ⋯ menu.',
+  ] },
   { version: '0.14.2', notes: [
     'Fixed: Stitch Editor no longer closes and opens itself again just after you start it. It now only restarts when you choose to install an update.',
   ] },
