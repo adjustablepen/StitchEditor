@@ -157,21 +157,18 @@ ipcMain.handle('project-version-read', async (e, id, file) => {
   return await new Promise((res, rej) => zlib.gunzip(buf, (err, out) => err ? rej(err) : res(out.toString('utf8'))));
 });
 
-// Live updates: when files in the app folder change, save + reload the window (or relaunch if main/preload changed).
-let updTimer = null, needRelaunch = false;
+// Dev builds only: when files in src/ change, save + reload the window in place. The app never closes and reopens
+// by itself except after installing an update (see update-install). Changes to main.js/preload.js need a manual restart.
+let updTimer = null;
 function watchForUpdates() {
+  if (app.isPackaged) return;
   try {
     fsw.watch(__dirname, { recursive: true }, (ev, file) => {
       if (!file || installing) return;
-      const f = String(file).replace(/\\/g, '/');
-      if (/^(main\.js|preload\.js|package\.json)$/.test(f)) needRelaunch = true; // top level only - not node_modules/**/package.json
-      else if (!/^src\//.test(f)) return;
+      if (!/^src\//.test(String(file).replace(/\\/g, '/'))) return;
       clearTimeout(updTimer);
       updTimer = setTimeout(() => {
-        const relaunch = needRelaunch; needRelaunch = false;
-        const wins = BrowserWindow.getAllWindows();
-        if (!wins.length) return;
-        for (const w of wins) w.webContents.send('app-updated', { relaunch });
+        for (const w of BrowserWindow.getAllWindows()) w.webContents.send('app-updated', { relaunch: false });
       }, 1500);
     });
   } catch (err) { console.error('watch failed', err); }

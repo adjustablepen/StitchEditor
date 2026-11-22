@@ -1,5 +1,8 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.14.2', notes: [
+    'Fixed: Stitch Editor no longer closes and opens itself again just after you start it. It now only restarts when you choose to install an update.',
+  ] },
   { version: '0.14.1', notes: [
     'The Classic (R6) body has been removed from the 3D preview. Woman and Blocky are left. If you had Classic picked, the preview shows Woman.',
   ] },
