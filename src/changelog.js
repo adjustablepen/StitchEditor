@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.16.0', notes: [
+    'Gradients can now have more than two colours. Press + next to the colour box to add a stop between the selected one and the next (or click the gradient bar to add one where you click). Drag stops to move them. Delete removes the selected stop; a gradient always keeps at least two.',
+    'You can zoom in much further: about 10 pixels now fill the whole view.',
+  ] },
   { version: '0.15.0', notes: [
     'New: adjustment layers. Brightness & contrast, Hue & saturation, Curves and Temperature & tint can now be layers that change the colours of everything below them without touching the pixels. Double-click one to change it again at any time, paint black on it to keep parts unchanged, or lower its opacity to soften it. Find them under Adjustment → New adjustment layer, Layer → Adjustment layer, or the half-circle button at the bottom of the Layers panel. With a selection, only the selected part changes.',
     'An adjustment layer inside a group only changes the layers in that group. Merge down on an adjustment layer bakes it into the layer below.',

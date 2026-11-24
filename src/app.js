@@ -260,7 +260,8 @@ function drawOverlay() {
 
 // ------------------------------------------------------------------ zoom & pan
 function setZoom(z, anchor) {
-  z = Math.min(12, Math.max(0.25, z));
+  const sr = scroller.getBoundingClientRect();
+  z = Math.min(Math.max(12, Math.ceil(Math.max(sr.width, sr.height) / 10)), Math.max(0.25, z)); // max: about 10 pixels fill the view
   let before;
   if (anchor) { const r = stack.getBoundingClientRect(); before = { x: (anchor.x - r.left) / state.zoom, y: (anchor.y - r.top) / state.zoom }; }
   state.zoom = z;
@@ -1541,10 +1542,19 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     const colIn = el('input'); colIn.type = 'color'; colIn.className = 'gcol';
     colIn.oninput = () => { p.stops[sel].color = colIn.value; redraw(); emit(); };
     const delB = el('button', 'ob-icon', ICONS.del); delB.title = 'Delete stop'; delB.onclick = () => { if (p.stops.length > 2) { p.stops.splice(sel, 1); sel = 0; redraw(); emit(); } };
-    ctl.append(obLabel('Opacity:'), opN, obLabel('Color:'), colIn, delB);
+    const addB = el('button', 'ob-icon', '+'); addB.title = 'Add stop between the selected one and the next';
+    addB.onclick = () => {
+      const st = [...p.stops].sort((a, b) => a.pos - b.pos), cur = p.stops[sel] || st[0];
+      let i = st.indexOf(cur), j = i < st.length - 1 ? i + 1 : i - 1; // neighbour: the next stop, or the previous if last
+      const n = st[j] || cur, hx = (c) => [1, 3, 5].map(k => parseInt(c.slice(k, k + 2), 16) || 0);
+      const a = hx(cur.color), b = hx(n.color), mix = a.map((v, k) => Math.round((v + b[k]) / 2).toString(16).padStart(2, '0')).join('');
+      p.stops.push({ pos: n === cur ? Math.max(0, cur.pos - .1) : (cur.pos + n.pos) / 2, color: '#' + mix, alpha: ((cur.alpha ?? 1) + (n.alpha ?? 1)) / 2 });
+      sel = p.stops.length - 1; redraw(); emit();
+    };
+    ctl.append(obLabel('Opacity:'), opN, obLabel('Color:'), colIn, addB, delB);
     const kind = obSeg([{ v: 'linear', text: 'Linear' }, { v: 'radial', text: 'Radial' }], () => p.kind, v => { p.kind = v; redraw(); emit(); });
     const dir = obNum(() => p.angle || 0, v => { p.angle = v; redraw(); emit(); }, { min: 0, max: 359, suffix: '°' });
-    const row2 = el('div', 'grow-ctl'); row2.append(kind, obLabel('Direction:'), dir);
+    const row2 = el('div', 'grow-ctl'), dirBox = el('div', 'grow-pair'); dirBox.append(obLabel('Direction:'), dir); row2.append(kind, dirBox);
     const presets = grid([...(allowNone ? [noneBtn(() => { p = { type: 'none' }; emit(); })] : []), ...GRAD_PRESETS.map(g => { const b = el('button', 'fill-sw'); b.style.background = paintCSS(g); b.onclick = () => { p = clone(g); sel = 0; redraw(); emit(); }; return b; })]);
     function redraw() {
       barIn.style.background = `${paintCSS({ ...p, kind: 'linear', angle: 0 })}, repeating-conic-gradient(#3a3a3a 0 25%, #2a2a2a 0 50%) 0 0/12px 12px`;

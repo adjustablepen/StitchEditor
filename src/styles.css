@@ -452,6 +452,7 @@ input[type=range], input[type=checkbox] { accent-color: var(--accent); }
 .gstop.on { border-color: var(--accent); box-shadow: 0 0 0 1px #fff; }
 .grow-ctl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .grow-ctl .ob-label { margin-left: 0; }
+.grow-pair { display: flex; align-items: center; gap: 6px; flex: none; }
 .gcol { width: 44px; height: 26px; padding: 0; border: 1px solid #4a4a4a; border-radius: 3px; background: none; cursor: pointer; }
 .gcol::-webkit-color-swatch-wrapper { padding: 2px; }
 .gcol::-webkit-color-swatch { border: 0; border-radius: 2px; }
