@@ -330,7 +330,8 @@ function applyEntry(e, key) {
   editVersion++;
   if (e.t === 'px' && e.m) { const l = doc().layers.find(x => x.id === e.id); if (l?.mask) { l.mask.getContext('2d').putImageData(e[key], 0, 0); l._maDirty = true; } }
   else if (e.t === 'px') { const l = doc().layers.find(x => x.id === e.id); if (l) { l.ctx.putImageData(e[key], 0, 0); if ('va' in e) { const v = clone(key === 'before' ? e.vb : e.va); if (v) l.vec = v; else delete l.vec; } } }
-  else if (e.t === 'sw') { const s = swatchById(e.id); if (s) { s.paint = clone(e[key]); rerenderFills(); } }
+  else if (e.t === 'sw') { const s = swatchById(e.id); if (s) { s[e.key || 'paint'] = clone(e[key]); rerenderFills(); } }
+  else if (e.t === 'sws') { const s = swatchById(e.id); if (s) { s.sync = e[key].sync; s.paintPants = e[key].paintPants ? clone(e[key].paintPants) : undefined; rerenderFills(); scheduleAutosave(); } }
   else if (e.t === 'swo') { const ids = e[key]; state.swatches.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); renderSwatches(); scheduleAutosave(); }
   else if (e.t === 'prop') { const l = doc().layers.find(x => x.id === e.id); if (l) l[e.key] = e[key]; }
   else if (e.t === 'sel') { selX.clearRect(0, 0, W, H); selX.putImageData(e[key], 0, 0); selectionChanged(false); }
@@ -1502,25 +1503,53 @@ function colorPicker(hex, onChange) {
   const w = el('div', 'cp');
   const sv = mkCanvas(300, 130); sv.className = 'cp-sv'; const svBox = el('div', 'cp-svbox'), ring = el('div', 'cp-ring'); svBox.append(sv, ring); const hue = mkCanvas(300, 16); hue.className = 'cp-hue';
   const row = el('div', 'cp-row'); const hexIn = el('input', 'cp-hex'); hexIn.value = hex; const drop = el('button', 'ob-icon', '<svg viewBox="0 0 24 24"><path d="M14 6l4 4"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l-2-2z"/><path d="M15 8l-9 9-1 3 3-1 9-9"/></svg>');
-  drop.title = 'Pick a colour from the canvas'; row.append(hexIn, drop); w.append(svBox, hue, row);
+  drop.title = 'Pick a colour from the canvas'; row.append(hexIn, drop);
+  const rgbRow = el('div', 'cp-rgb'), rgbIn = ['R', 'G', 'B'].map((n) => { const lab = el('label', 'cp-rgb-l'); lab.textContent = n; const i = el('input', 'cp-num'); i.type = 'text'; i.inputMode = 'numeric'; i.maxLength = 3; lab.append(i); rgbRow.append(lab); return i; });
+  w.append(svBox, hue, row, rgbRow);
   const draw = () => {
     const x = sv.getContext('2d'); x.fillStyle = hsv2hex(h, 1, 1); x.fillRect(0, 0, 300, 130);
     let g = x.createLinearGradient(0, 0, 300, 0); g.addColorStop(0, '#fff'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(0, 0, 300, 130);
     g = x.createLinearGradient(0, 0, 0, 130); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, '#000'); x.fillStyle = g; x.fillRect(0, 0, 300, 130);
-    ring.style.left = s * 100 + '%'; ring.style.top = (1 - v) * 100 + '%'; ring.style.borderColor = v > .5 ? '#000' : '#fff';
-    const y = hue.getContext('2d'); g = y.createLinearGradient(0, 0, 300, 0); for (let i = 0; i <= 6; i++) g.addColorStop(i / 6, hsv2hex(i * 60 % 360, 1, 1)); y.fillStyle = g; y.fillRect(0, 0, 300, 16);
+    ring.style.left = s * 100 + '%'; ring.style.top = (1 - v) * 100 + '%';    const y = hue.getContext('2d'); g = y.createLinearGradient(0, 0, 300, 0); for (let i = 0; i <= 6; i++) g.addColorStop(i / 6, hsv2hex(i * 60 % 360, 1, 1)); y.fillStyle = g; y.fillRect(0, 0, 300, 16);
     y.fillStyle = '#fff'; y.strokeStyle = '#000'; y.fillRect(h / 360 * 300 - 2, 0, 4, 16); y.strokeRect(h / 360 * 300 - 2, .5, 4, 15);
   };
-  const emit = () => { const c = hsv2hex(h, s, v); hexIn.value = c; draw(); onChange(c); };
+  const syncRgb = (c) => { hexToRgb(c).forEach((n, i) => { rgbIn[i].value = n; }); };
+  const emit = () => { const c = hsv2hex(h, s, v); hexIn.value = c; syncRgb(c); draw(); onChange(c); };
+  // accepts #rgb, rrggbb, "rgb(1, 2, 3)" or "1 2 3" pasted from anywhere
+  const parseColour = (t) => {
+    t = t.trim(); let m = t.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (m) { let x = m[1]; if (x.length === 3) x = [...x].map(ch => ch + ch).join(''); return '#' + x.toLowerCase(); }
+    m = t.match(/^(?:rgba?\()?\s*(\d{1,3})\D+(\d{1,3})\D+(\d{1,3})/i);
+    return m ? toHex(...[m[1], m[2], m[3]].map(n => Math.min(255, +n))) : null;
+  };
+  const applyText = (t) => { const c = parseColour(t); if (!c) return false; [h, s, v] = hex2hsv(c); emit(); return true; };
+  const stopKeys = (i) => { i.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') i.blur(); }; i.onpaste = (e) => e.stopPropagation(); i.onfocus = () => i.select(); };
+  hexIn.oninput = () => { const t = hexIn.value.trim(); if (/^#?[0-9a-f]{6}$/i.test(t) || /^rgba?\(/i.test(t)) applyText(t); };
+  hexIn.onpaste = (e) => e.stopPropagation();
+  rgbIn.forEach((i, k) => {
+    stopKeys(i);
+    const set = () => { const n = parseInt(i.value, 10); if (isNaN(n)) { syncRgb(hsv2hex(h, s, v)); return; } const rgb = hexToRgb(hsv2hex(h, s, v)); rgb[k] = Math.max(0, Math.min(255, n)); [h, s, v] = hex2hsv(toHex(...rgb)); emit(); };
+    i.oninput = () => { if (i.value !== '' && !/^\d+$/.test(i.value)) { if (!applyText(i.value)) i.value = i.value.replace(/\D/g, ''); return; } if (i.value !== '') set(); };
+    i.onchange = set;
+  });
   const drag = (cv, fn) => { cv.onpointerdown = (e) => { cv.setPointerCapture(e.pointerId); fn(e); cv.onpointermove = fn; }; cv.onpointerup = () => { cv.onpointermove = null; }; };
   drag(sv, (e) => { const r = sv.getBoundingClientRect(); s = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); v = Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / r.height)); emit(); });
   drag(hue, (e) => { const r = hue.getBoundingClientRect(); h = Math.max(0, Math.min(359.9, (e.clientX - r.left) / r.width * 360)); emit(); });
-  hexIn.onchange = () => { let t = hexIn.value.trim(); if (!t.startsWith('#')) t = '#' + t; if (/^#[0-9a-f]{3}$/i.test(t)) t = '#' + [...t.slice(1)].map(ch => ch + ch).join(''); if (/^#[0-9a-f]{6}$/i.test(t)) { [h, s, v] = hex2hsv(t.toLowerCase()); emit(); } else hexIn.value = hsv2hex(h, s, v); };
+  hexIn.onchange = () => { if (!applyText(hexIn.value)) hexIn.value = hsv2hex(h, s, v); };
   hexIn.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') hexIn.blur(); };
   drop.onclick = () => { pickOnce = (c) => { [h, s, v] = hex2hsv(c); emit(); }; toast('Click the canvas to pick a colour'); stack.classList.add('picking'); };
-  w.set = (c) => { [h, s, v] = hex2hsv(c); hexIn.value = c; draw(); };
-  draw(); return w;
+  w.set = (c) => { [h, s, v] = hex2hsv(c); hexIn.value = c; syncRgb(c); draw(); };
+  syncRgb(hex); draw(); return w;
 }
+// every colour box (<input type=color>) opens our own picker (RGB, pasteable hex, eyedropper) instead of Chromium's
+document.addEventListener('click', (e) => {
+  const inp = e.target.closest?.('input[type=color]'); if (!inp || inp.id === 'colFg' || inp.id === 'colBg') return; // those two have their own dialog
+  e.preventDefault();
+  if (popAnchor === inp) { closePop(); return; }
+  const cp = colorPicker(inp.value, (c) => { inp.value = c; inp.dispatchEvent(new Event('input', { bubbles: true })); });
+  openPop(inp, cp, { width: 260 });
+  if (popEl) { popEl.classList.add('cp-pop'); const r = inp.getBoundingClientRect(); if (r.bottom + popEl.offsetHeight > window.innerHeight - 8) popEl.style.top = Math.max(8, r.top - popEl.offsetHeight - 6) + 'px'; }
+}, true);
 const SWATCHES = ['#260707', '#6b0b0b', '#5a0a10', '#4c0812', '#7a0a0a', '#110505', '#3d0a0a', '#0e2a4f', '#ffffff', '#8a8a8a', '#000000', '#d23c3c', '#ff8a00', '#ffd400', '#3fae5a', '#2f5bd8', '#7b3fd8', '#f06bb6'];
 const GRAD_PRESETS = [
   [['#260707', 1], ['#6b0b0b', 1]], [['#000000', 1], ['#ffffff', 1]], [['#c9d6ff', 1], ['#0b1d4a', 1]], [['#000000', 1], ['#3a3a3a', 1]], [['#ffffff', 1], ['#7a7a7a', 1]],
@@ -2152,11 +2181,15 @@ async function loadFillMask(url, w, h) {
   const img = new Image(); img.src = url; await img.decode();
   const c = mkCanvas(w, h); c.getContext('2d').drawImage(img, 0, 0); c._ready = true; maskCache.set(url, c);
 }
-function fillPaint(v) { return (v.link && swatchById(v.link)?.paint) || v.paint; }
+// a colour can have its own value for the pants (sw.sync === false): shirt uses sw.paint, pants uses sw.paintPants
+const swPaint = (sw, part) => (sw && sw.sync === false && part === 'pants' && sw.paintPants) || sw?.paint;
+const swEditsPants = (sw) => sw.sync === false && state.mode === 'pants';
+function partOf(l) { for (const k in state.docs) if (state.docs[k].layers.includes(l)) return k; return l.part; }
+function fillPaint(v, part) { return (v.link && swPaint(swatchById(v.link), part)) || v.paint; }
 function renderFill(l, live) {
   const v = l.vec, c = l.ctx, m = live || maskCanvas(v.mask), w = l.canvas.width, h = l.canvas.height;
   c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, w, h);
-  const fp = fillPaint(v);
+  const fp = fillPaint(v, partOf(l));
   if (fp?.type === 'gradient' && fp.match && w === TW && h === TH) drawMatched(c, fp, Object.keys(PARTS));
   else { c.fillStyle = paintStyle(c, fp, v.bb || [0, 0, w, h]); c.fillRect(0, 0, w, h); }
   c.globalCompositeOperation = 'destination-in'; c.drawImage(m, 0, 0); c.restore();
@@ -2189,11 +2222,19 @@ function convertToFill(mode, link) {
   toast(`“${l.name}” is now a colour fill - change its colour in the Colours panel`);
 }
 function editSwatch(sw) {
-  const orig = clone(sw.paint);
-  openFillDialog(orig, { title: `Colour: ${sw.name}`, allowNone: false, match: state.mode !== 'canvas' }, (p) => { sw.paint = p; rerenderFills(); }, (ok, p) => {
-    sw.paint = ok ? p : orig; rerenderFills();
-    if (ok && JSON.stringify(orig) !== JSON.stringify(p)) pushHistory({ t: 'sw', id: sw.id, before: orig, after: clone(p), label: `Colour “${sw.name}”` });
+  const key = swEditsPants(sw) ? 'paintPants' : 'paint', orig = clone(swPaint(sw, state.mode));
+  const setP = (p) => { sw[key] = p; rerenderFills(); };
+  openFillDialog(orig, { title: `Colour: ${sw.name}${key === 'paintPants' ? ' (pants)' : ''}`, allowNone: false, match: state.mode !== 'canvas' }, setP, (ok, p) => {
+    setP(ok ? p : orig);
+    if (ok && JSON.stringify(orig) !== JSON.stringify(p)) pushHistory({ t: 'sw', id: sw.id, key, before: orig, after: clone(p), label: `Colour “${sw.name}”` });
   });
+}
+// turn shirt/pants syncing off or on for one colour; off, the pants get their own copy to edit
+function toggleSwatchSync(sw) {
+  const before = { sync: sw.sync !== false, paintPants: sw.paintPants ? clone(sw.paintPants) : null };
+  if (sw.sync === false) sw.sync = true; else { sw.sync = false; if (!sw.paintPants) sw.paintPants = clone(sw.paint); }
+  pushHistory({ t: 'sws', id: sw.id, before, after: { sync: sw.sync !== false, paintPants: sw.paintPants ? clone(sw.paintPants) : null }, label: sw.sync === false ? `Colour “${sw.name}”: separate for pants` : `Colour “${sw.name}”: same on shirt and pants` });
+  rerenderFills(); scheduleAutosave();
 }
 function editFillLayerColour(l) {
   if (l.vec.link && swatchById(l.vec.link)) { editSwatch(swatchById(l.vec.link)); return; }
@@ -2202,7 +2243,7 @@ function editFillLayerColour(l) {
 }
 function linkActive(sw) {
   const l = activeLayer();
-  if (l.vec?.type === 'fill') { vecEdit(l, v => { v.link = sw ? sw.id : null; if (!sw) v.paint = clone(fillPaint(l.vec)); }, sw ? `Link to “${sw.name}”` : 'Unlink colour'); flushVecEdit(); rerenderFills(); return; }
+  if (l.vec?.type === 'fill') { vecEdit(l, v => { v.link = sw ? sw.id : null; if (!sw) v.paint = clone(fillPaint(l.vec, partOf(l))); }, sw ? `Link to “${sw.name}”` : 'Unlink colour'); flushVecEdit(); rerenderFills(); return; }
   if (!sw) return;
   convertToFill('alpha', sw.id); rerenderFills();
 }
@@ -2212,7 +2253,7 @@ function renderSwatches() {
   for (const d of Object.values(state.docs)) for (const l of d.layers) if (l.vec?.type === 'fill' && l.vec.link) counts[l.vec.link] = (counts[l.vec.link] || 0) + 1;
   for (const sw of state.swatches) {
     const row = el('div', 'sw-row' + (al?.vec?.type === 'fill' && al.vec.link === sw.id ? ' on' : ''));
-    const chip = el('button', 'sw-chip'); chip.style.background = paintCSS(sw.paint); chip.title = 'Change this colour everywhere it is used'; chip.onclick = () => editSwatch(sw);
+    const chip = el('button', 'sw-chip'); chip.style.background = paintCSS(swPaint(sw, state.mode)); chip.title = sw.sync === false ? `Change this colour (${state.mode} only - shirt and pants are separate)` : 'Change this colour everywhere it is used'; chip.onclick = () => editSwatch(sw);
     const name = el('span', 'sw-name'); name.textContent = sw.name; name.title = 'Double-click to rename';
     name.ondblclick = () => { const inp = el('input', 'sw-rename'); inp.value = sw.name; name.replaceWith(inp); inp.focus(); inp.select(); const done = () => { sw.name = inp.value.trim() || sw.name; renderSwatches(); rebuildLayers(); scheduleAutosave(); }; inp.onblur = done; inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); }; };
     const cnt = el('span', 'sw-count'); cnt.textContent = counts[sw.id] ? `${counts[sw.id]} layer${counts[sw.id] > 1 ? 's' : ''}` : '';
@@ -2220,10 +2261,13 @@ function renderSwatches() {
     link.title = al?.vec?.type === 'fill' ? `Link “${al.name}” to this colour` : `Turn “${al?.name}” into a colour fill using this colour (keeps its shape)`;
     link.onclick = () => linkActive(sw);
     const del = el('button', 'ph-icon sw-del', '×'); del.title = 'Remove colour (linked layers keep it)';
-    del.onclick = () => { for (const d of Object.values(state.docs)) for (const l of d.layers) if (l.vec?.link === sw.id) { l.vec.paint = clone(sw.paint); l.vec.link = null; } state.swatches = state.swatches.filter(s => s !== sw); rerenderFills(); rebuildLayers(); scheduleAutosave(); };
+    del.onclick = () => { for (const d of Object.values(state.docs)) for (const l of d.layers) if (l.vec?.link === sw.id) { l.vec.paint = clone(swPaint(sw, partOf(l))); l.vec.link = null; } state.swatches = state.swatches.filter(s => s !== sw); rerenderFills(); rebuildLayers(); scheduleAutosave(); };
     const grip = el('span', 'sw-grip'); grip.title = 'Drag to reorder';
     row.dataset.id = sw.id; row.onpointerdown = (e) => swDragStart(e, row, sw);
-    row.append(grip, chip, name, cnt, link, del); list.append(row);
+    const sep = sw.sync === false, sync = el('button', 'ph-icon sw-sync' + (sep ? ' off' : ''), '<svg viewBox="0 0 24 24"><path d="M4 7h13l-3-3"/><path d="M20 17H7l3 3"/></svg>');
+    sync.title = sep ? 'Shirt and pants have separate values. Click to use one value for both again' : 'Shirt and pants share this colour. Click to give the pants their own value';
+    sync.onclick = () => toggleSwatchSync(sw);
+    row.append(grip, chip, name, cnt, sync, link, del); list.append(row);
   }
 }
 // drag a colour row (anywhere except its buttons / rename box) to reorder the list
@@ -2823,7 +2867,7 @@ function setMode(m) {
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
   otherView.classList.toggle('before', m === 'pants'); otherView.title = m === 'pants' ? 'Shirt - click to edit it' : 'Pants - click to edit them';
   if (!regionsFor(m).some(r => r.id === state.region)) state.region = 'all';
-  buildRegionSelect(); rebuildLayers(); changed();
+  buildRegionSelect(); rebuildLayers(); renderSwatches(); changed();
 }
 $$('.tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
 function setPair(v) {
@@ -2972,7 +3016,7 @@ async function fillDocs(set, data) {
     const src = data.docs?.[k]; if (!src) continue;
     const d = newDoc(k, set.w, set.h); d.layers = []; d.counter = src.counter || src.layers.length;
     for (const o of src.layers) {
-      const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, mirror: !!o.mirror, visible: o.visible, opacity: o.opacity, blend: o.blend });
+      const l = makeLayer(o.name, set.w, set.h); Object.assign(l, { part: k, kind: o.kind || 'Layer', group: o.group || null, locked: !!o.locked, mirror: !!o.mirror, visible: o.visible, opacity: o.opacity, blend: o.blend });
       const img = new Image(); img.src = o.png; await img.decode(); l.ctx.drawImage(img, 0, 0);
       if (o.mask) { const mi = new Image(); mi.src = o.mask; await mi.decode(); l.mask = mkCanvas(set.w, set.h); l.mask.getContext('2d', { willReadFrequently: true }).drawImage(mi, 0, 0); l.maskOff = !!o.maskOff; } if (o.vec) { l.vec = o.vec; if (o.vec.type === 'fill') { await loadFillMask(o.vec.mask, set.w, set.h); renderFill(l); } if (o.vec.type === 'text') loadFont(o.vec.family).then(() => { renderVec(l); requestRender(); }); } d.layers.push(l);
     }

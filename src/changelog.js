@@ -1,5 +1,9 @@
 // Shown in "What's new" on the Home page after an update. Newest first, written for users.
 export const CHANGELOG = [
+  { version: '0.17.0', notes: [
+    'New colour picker everywhere. Every colour box (gradient stops, patterns, text effects and more) now opens the same picker as the Primary colour, with R, G and B boxes, a hex box you can paste into (#674B33, 674B33 or rgb(103, 75, 51) all work) and the eyedropper. The marker is a clean ring that shows on any colour.',
+    'Shirt and pants colours can now be separate. In the Colours panel, the arrows button on each colour turns off sharing between the shirt and pants: the pants get their own value, and editing the colour while on Pants only changes the pants. Click it again to use one value for both.',
+  ] },
   { version: '0.16.0', notes: [
     'Gradients can now have more than two colours. The Gradient tool has a new Colours box: open it to add stops with + (it goes between the selected stop and the next) or by clicking the bar, drag them to move, and delete the selected one (a gradient always keeps at least two). The same editor is in the Fill, Stroke and Colour fill windows. The arrow button next to the box goes back to your primary and secondary colours.',
     'New for shirts and pants: Match top and bottom. Turn it on in the Gradient tool (then press on a body part) or in a Colour fill gradient. Each part (torso, arms, legs) runs top to bottom on its front, back and sides, the Up face is the first colour and the Down face is the last, so everything lines up on the 3D model.',
