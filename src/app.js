@@ -30,7 +30,7 @@ const state = {
   mode: 'shirt',
   docs: { shirt: newDoc('shirt'), pants: newDoc('pants') },
   tool: 'brush', fg: '#d23c3c', bg: '#ffffff',
-  size: 6, opacity: 1, hardEraser: false, fillShape: false, tolerance: 24, sampleAll: false, gradTransparent: false,
+  size: 6, opacity: 1, hardEraser: false, fillShape: false, tolerance: 24, sampleAll: false, gradTransparent: false, gradPaint: null, gradMatch: false,
   font: 'Arial', fontSize: 24, bold: false,
   region: 'all', underlay: true, guides: true, shade: false, seams: false, zoom: 1, recent: [],
 };
@@ -876,6 +876,8 @@ const pencilTool = {
 
 // ===== shapes / gradient (draw into a scratch canvas, then composite through region + selection)
 const shapeC = mkCanvas(), shX = shapeC.getContext('2d');
+// the Gradient tool: the colours picked in its window, or the primary to secondary (or to transparent) colours until then
+const toolGradient = () => state.gradPaint || { type: 'gradient', kind: 'linear', angle: 0, stops: [{ pos: 0, color: state.fg, alpha: 1 }, { pos: 1, color: state.gradTransparent ? state.fg : state.bg, alpha: state.gradTransparent ? 0 : 1 }] };
 function drawShape(c, a, b, shift) {
   c.strokeStyle = c.fillStyle = state.fg; c.lineWidth = state.size; c.lineCap = 'round'; c.lineJoin = 'miter';
   let x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
@@ -890,8 +892,10 @@ function drawShape(c, a, b, shift) {
     if (shift) { const ang = Math.round(Math.atan2(b.y - a.y, b.x - a.x) / (Math.PI / 4)) * Math.PI / 4, len = Math.hypot(b.x - a.x, b.y - a.y); ex = a.x + Math.cos(ang) * len; ey = a.y + Math.sin(ang) * len; }
     c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(ex, ey); c.stroke();
   } else if (state.tool === 'gradient') {
-    const g = c.createLinearGradient(a.x, a.y, b.x, b.y); g.addColorStop(0, state.fg);
-    if (state.gradTransparent) { const [r, gg, bb] = hexToRgb(state.fg); g.addColorStop(1, `rgba(${r},${gg},${bb},0)`); } else g.addColorStop(1, state.bg);
+    const gp = toolGradient();
+    if (state.gradMatch && state.mode !== 'canvas') { const f = faceAt(a.x, a.y); if (f) { drawMatched(c, gp, [f.part]); return; } }
+    const g = c.createLinearGradient(a.x, a.y, b.x, b.y);
+    for (const s of [...gp.stops].sort((x, y) => x.pos - y.pos)) g.addColorStop(Math.max(0, Math.min(1, s.pos)), rgba(s.color, s.alpha ?? 1));
     c.fillStyle = g; c.fillRect(0, 0, W, H);
   }
 }
@@ -1346,7 +1350,12 @@ function buildOptions() {
     add(obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }), obLabel('Tolerance:'), obNum(() => state.tolerance, v => { state.tolerance = v; }, { min: 0, max: 255 }),
       obToggle('Sample all layers', () => state.sampleAll, v => { state.sampleAll = v; }), el('span', 'ob-hint', 'Shift+click fills the whole selection (or template)'));
   } else if (t === 'gradient') {
-    add(obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }), obToggle('Fade to transparent', () => state.gradTransparent, v => { state.gradTransparent = v; }));
+    let prev = null;
+    const sw = paintSwatch(toolGradient, (p, done, cancel) => { if (cancel) state.gradPaint = prev; else state.gradPaint = p; }, { title: 'Gradient colours - add, move and remove stops', gradOnly: true, allowNone: false });
+    sw.addEventListener('pointerdown', () => { prev = state.gradPaint; }, true);
+    const reset = el('button', 'ob-icon', '↺'); reset.title = 'Back to the primary and secondary colours'; reset.onclick = () => { state.gradPaint = null; sw.sync(); };
+    add(obLabel('Colours:'), sw, reset, obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }), obToggle('Fade to transparent', () => state.gradTransparent, v => { state.gradTransparent = v; }));
+    if (state.mode !== 'canvas') add(obToggle('Match top and bottom', () => state.gradMatch, v => { state.gradMatch = v; }), el('span', 'ob-hint', 'Press on a body part: its sides run top to bottom, Up takes the first colour, Down the last'));
   } else if (t === 'rect' || t === 'ellipse' || t === 'line') {
     add(obLabel(t === 'line' ? 'Width:' : 'Stroke:'), obNum(() => state.size, v => { state.size = v; }, { min: 1, max: 100, suffix: 'px' }), obLabel('Opacity:'), obNum(() => Math.round(state.opacity * 100), v => { state.opacity = v / 100; }, { min: 1, max: 100, suffix: '%' }));
     if (t !== 'line') add(obToggle('Filled', () => state.fillShape, v => { state.fillShape = v; }));
@@ -1466,6 +1475,16 @@ function paintStyle(c, p, [x, y, w, h]) {
   }
   return '#000';
 }
+// template gradients that line up: per body part, front/back/sides run top to bottom, Up = first colour, Down = last
+function drawMatched(c, p, parts) {
+  const st = [...p.stops].sort((a, b) => a.pos - b.pos), first = st[0], last = st[st.length - 1], col = (s) => rgba(s.color, s.alpha ?? 1);
+  for (const part of parts) for (const f of FACE_ORDER) {
+    const [x, y, w, h] = PARTS[part][f];
+    if (f === 'U') c.fillStyle = col(first); else if (f === 'D') c.fillStyle = col(last);
+    else { const g = c.createLinearGradient(0, y, 0, y + h); for (const s of st) g.addColorStop(Math.max(0, Math.min(1, s.pos)), col(s)); c.fillStyle = g; }
+    c.fillRect(x, y, w, h);
+  }
+}
 function paintCSS(p) {
   if (!p || p.type === 'none') return 'linear-gradient(135deg, #fff 45%, #e33 46% 54%, #fff 55%)';
   if (p.type === 'color') return p.color;
@@ -1510,7 +1529,7 @@ const GRAD_PRESETS = [
 ].map(st => ({ type: 'gradient', kind: 'linear', angle: 0, stops: st.map((s, i, a) => ({ pos: Array.isArray(s) && a.length === 3 && i === 1 ? .5 : i / (a.length - 1), color: s[0], alpha: 1 })) }));
 
 let fillDlg = null;
-function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone = true } = {}, onChange, onDone) {
+function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone = true, gradOnly = false, match = false } = {}, onChange, onDone) {
   if (fillDlg && document.body.contains(fillDlg.wrap)) { if (fillDlg.title === title) return; fillDlg.cancel(); }
   let p = clone(initial) || { type: 'color', color: state.fg };
   const lastColor = () => p.type === 'color' ? p.color : p.type === 'gradient' ? p.stops[0].color : p.type === 'pattern' ? p.color : state.fg;
@@ -1518,7 +1537,7 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
   const tabs = el('div', 'ob-seg fill-tabs'); const pane = el('div', 'fill-pane');
   const emit = () => onChange(clone(p));
   const tab = (t) => { tabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === t)); pane.innerHTML = ''; (t === 'color' ? colorPane : t === 'gradient' ? gradPane : patternPane)(); };
-  if (!colorOnly) { for (const [v, l] of [['color', 'Color'], ['gradient', 'Gradient'], ['pattern', 'Pattern']]) { const b = el('button', 'ob-segbtn text'); b.textContent = l; b.dataset.v = v; b.onclick = () => tab(v); tabs.append(b); } body.append(tabs); }
+  if (!colorOnly && !gradOnly) { for (const [v, l] of [['color', 'Color'], ['gradient', 'Gradient'], ['pattern', 'Pattern']]) { const b = el('button', 'ob-segbtn text'); b.textContent = l; b.dataset.v = v; b.onclick = () => tab(v); tabs.append(b); } body.append(tabs); }
   body.append(pane);
   const grid = (items, cls) => { const g = el('div', 'fill-grid ' + (cls || '')); items.forEach(it => g.append(it)); return g; };
   const noneBtn = (fn) => { const b = el('button', 'fill-sw none'); b.title = 'None'; b.onclick = fn; return b; };
@@ -1555,7 +1574,7 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     const kind = obSeg([{ v: 'linear', text: 'Linear' }, { v: 'radial', text: 'Radial' }], () => p.kind, v => { p.kind = v; redraw(); emit(); });
     const dir = obNum(() => p.angle || 0, v => { p.angle = v; redraw(); emit(); }, { min: 0, max: 359, suffix: '°' });
     const row2 = el('div', 'grow-ctl'), dirBox = el('div', 'grow-pair'); dirBox.append(obLabel('Direction:'), dir); row2.append(kind, dirBox);
-    const presets = grid([...(allowNone ? [noneBtn(() => { p = { type: 'none' }; emit(); })] : []), ...GRAD_PRESETS.map(g => { const b = el('button', 'fill-sw'); b.style.background = paintCSS(g); b.onclick = () => { p = clone(g); sel = 0; redraw(); emit(); }; return b; })]);
+    const presets = grid([...(allowNone ? [noneBtn(() => { p = { type: 'none' }; emit(); })] : []), ...GRAD_PRESETS.map(g => { const b = el('button', 'fill-sw'); b.style.background = paintCSS(g); b.onclick = () => { const m = p.match; p = clone(g); if (m) p.match = true; sel = 0; redraw(); emit(); }; return b; })]);
     function redraw() {
       barIn.style.background = `${paintCSS({ ...p, kind: 'linear', angle: 0 })}, repeating-conic-gradient(#3a3a3a 0 25%, #2a2a2a 0 50%) 0 0/12px 12px`;
       stopsEl.innerHTML = '';
@@ -1568,7 +1587,13 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     }
     function syncCtl() { opN.sync(); colIn.value = p.stops[sel]?.color || '#000000'; delB.disabled = p.stops.length <= 2; }
     barIn.onpointerdown = (e) => { const r = bar.getBoundingClientRect(), pos = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); const st = [...p.stops].sort((a, b) => a.pos - b.pos); let c = st[0].color; for (const s of st) if (s.pos <= pos) c = s.color; p.stops.push({ pos, color: c, alpha: 1 }); sel = p.stops.length - 1; redraw(); emit(); };
-    pane.append(bar, ctl, row2, presets); redraw();
+    const parts = [bar, ctl, row2];
+    if (match) { // templates: every body part gets the same top to bottom run, with its Up and Down faces matching the ends
+      const t = el('label', 'switch-row'); t.title = 'Each body part runs top to bottom on its front, back and sides. The Up face takes the first colour and the Down face the last.';
+      t.innerHTML = '<span>Match top and bottom of each part</span><input type="checkbox" class="switch">';
+      const ci = t.querySelector('input'); ci.checked = !!p.match; ci.onchange = () => { p.match = ci.checked; emit(); }; parts.push(t);
+    }
+    pane.append(...parts, presets); redraw();
   }
   function patternPane() {
     if (p.type !== 'pattern') { p = { type: 'pattern', id: 'dots', color: '#ffffff', scale: 100, angle: 0 }; emit(); }
@@ -1581,8 +1606,9 @@ function openFillDialog(initial, { title = 'Fill', colorOnly = false, allowNone 
     const rebuild = () => { g.innerHTML = ''; if (allowNone) g.append(noneBtn(() => { p = { type: 'none' }; emit(); })); for (const id of PATTERNS) { const b = el('button', 'fill-sw pat' + (p.id === id ? ' on' : '')); b.style.background = `url(${patternTile(id, '#fff').toDataURL()}) #2a2a2a`; b.title = id; b.onclick = () => { p.id = id; p.type = 'pattern'; drawPrev(); emit(); rebuild(); }; g.append(b); } };
     pane.append(prev, ctl, g); drawPrev(); rebuild();
   }
-  fillDlg = { title, ...dlg(title, body, { okLabel: 'OK', onOk: () => onDone(true, clone(p)), onCancel: () => onDone(false, clone(initial)) }) };
-  tab(colorOnly ? 'color' : (p.type === 'gradient' ? 'gradient' : p.type === 'pattern' ? 'pattern' : 'color'));
+  fillDlg = { title, ...dlg(title, body, { okLabel: 'OK', onOk: () => onDone(true, clone(p)), onCancel: () => onDone(false, clone(initial)),
+    compare: colorOnly ? undefined : { down: () => onChange(clone(initial)), up: () => onChange(clone(p)) } }) };
+  tab(colorOnly ? 'color' : gradOnly ? 'gradient' : (p.type === 'gradient' ? 'gradient' : p.type === 'pattern' ? 'pattern' : 'color'));
 }
 function paintSwatch(get, set, opts = {}) {
   const b = el('button', 'ob-swatch'); const inner = el('span'); b.append(inner);
@@ -2130,7 +2156,9 @@ function fillPaint(v) { return (v.link && swatchById(v.link)?.paint) || v.paint;
 function renderFill(l, live) {
   const v = l.vec, c = l.ctx, m = live || maskCanvas(v.mask), w = l.canvas.width, h = l.canvas.height;
   c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, w, h);
-  c.fillStyle = paintStyle(c, fillPaint(v), v.bb || [0, 0, w, h]); c.fillRect(0, 0, w, h);
+  const fp = fillPaint(v);
+  if (fp?.type === 'gradient' && fp.match && w === TW && h === TH) drawMatched(c, fp, Object.keys(PARTS));
+  else { c.fillStyle = paintStyle(c, fp, v.bb || [0, 0, w, h]); c.fillRect(0, 0, w, h); }
   c.globalCompositeOperation = 'destination-in'; c.drawImage(m, 0, 0); c.restore();
 }
 function rerenderFills() { for (const d of Object.values(state.docs)) for (const l of d.layers) if (l.vec?.type === 'fill') renderFill(l); requestRender(); renderSwatches(); }
@@ -2162,7 +2190,7 @@ function convertToFill(mode, link) {
 }
 function editSwatch(sw) {
   const orig = clone(sw.paint);
-  openFillDialog(orig, { title: `Colour: ${sw.name}`, allowNone: false }, (p) => { sw.paint = p; rerenderFills(); }, (ok, p) => {
+  openFillDialog(orig, { title: `Colour: ${sw.name}`, allowNone: false, match: state.mode !== 'canvas' }, (p) => { sw.paint = p; rerenderFills(); }, (ok, p) => {
     sw.paint = ok ? p : orig; rerenderFills();
     if (ok && JSON.stringify(orig) !== JSON.stringify(p)) pushHistory({ t: 'sw', id: sw.id, before: orig, after: clone(p), label: `Colour “${sw.name}”` });
   });
@@ -2170,7 +2198,7 @@ function editSwatch(sw) {
 function editFillLayerColour(l) {
   if (l.vec.link && swatchById(l.vec.link)) { editSwatch(swatchById(l.vec.link)); return; }
   const orig = clone(l.vec.paint);
-  openFillDialog(orig, { title: 'Fill colour', allowNone: false }, (p) => { l.vec.paint = p; renderFill(l); requestRender(); }, (ok, p) => { l.vec.paint = orig; renderFill(l); if (ok) vecEdit(l, v => { v.paint = clone(p); }, 'Fill colour'); requestRender(); });
+  openFillDialog(orig, { title: 'Fill colour', allowNone: false, match: state.mode !== 'canvas' }, (p) => { l.vec.paint = p; renderFill(l); requestRender(); }, (ok, p) => { l.vec.paint = orig; renderFill(l); if (ok) vecEdit(l, v => { v.paint = clone(p); }, 'Fill colour'); requestRender(); });
 }
 function linkActive(sw) {
   const l = activeLayer();
@@ -3241,7 +3269,7 @@ function dlg(title, bodyEl, { onOk, onCancel, okLabel = 'Apply', cancelLabel = '
   bodyEl.classList.add('dlg-body');
   const foot = document.createElement('div'); foot.className = 'dlg-foot';
   if (compare) {
-    const cmp = document.createElement('button'); cmp.className = 'dlg-compare'; cmp.title = 'Hold to compare with the original';
+    const cmp = document.createElement('button'); cmp.className = 'dlg-compare'; cmp.title = 'Compare (hold down)';
     cmp.innerHTML = '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 3v18"/><path d="M12 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-7z" fill="currentColor" stroke="none" opacity=".55"/></svg>';
     cmp.addEventListener('pointerdown', (e) => { cmp.setPointerCapture(e.pointerId); cmp.classList.add('on'); compare.down(); });
     const up = () => { if (cmp.classList.contains('on')) { cmp.classList.remove('on'); compare.up(); } };
